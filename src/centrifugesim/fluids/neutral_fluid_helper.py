@@ -189,6 +189,17 @@ def stable_dt(fluid, r, dr, dz,
     dt = safety * min(dt_adv, dt_visc, dt_cond)
     return dt, dt_adv, dt_visc, dt_cond
 
+def stable_adv_dt(fluid, r, dr, dz,
+                ur, uz, c_field,
+                safety=0.5):
+    # advection/acoustics        
+    a_r = np.max((np.abs(ur) + c_field)[fluid==1])
+    a_z = np.max((np.abs(uz) + c_field)[fluid==1])
+    dt_adv = dr / a_r
+    dt_adv = min(dt_adv, dz / a_z)
+    dt_adv*=safety
+    return dt_adv
+
 # ---------- Rusanov (LLF) flux for scalar advection in RZ ----------
 @njit(parallel=True, fastmath=True, cache=True)
 def rusanov_div_scalar_masked(q, ur, uz, r, dr, dz, a_r, a_z, out,
@@ -851,6 +862,295 @@ def compute_knudsen_field(mask, T, p, sigma, L_char, kb, out):
             else:
                 out[i, k] = 0.0 # Vacuum
 
+#############################################################################################
+#############################################################################################
+########## The kernels below are for semi-implicit Navier stokes solver #####################
+#############################################################################################
+#############################################################################################
+
+@njit(cache=True)
+def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
+                                   dt, dr, dz, max_iter=20, omega=1.4):
+    """
+    Implicit Viscosity for RADIAL velocity v_r.
+    Includes -v_r/r^2 term (hoop stress).
+    BCs: r=0 -> ur=0 (Geometric), Walls -> ur=0 (No Slip)
+    """
+    Nr, Nz = ur.shape
+    inv_dr2 = 1.0 / (dr * dr)
+    inv_dz2 = 1.0 / (dz * dz)
+
+    for k in range(max_iter):
+        max_diff = 0.0
+        
+        # Start at i=1 because ur[0,:] is always 0 (axis)
+        for i in range(1, Nr):
+            r = i * dr
+            
+            # Geometric coeffs
+            c_east = ((r + 0.5*dr) / r) * inv_dr2
+            c_west = ((r - 0.5*dr) / r) * inv_dr2
+            c_self_geo = 1.0 / (r * r) # Hoop stress term for vr
+
+            for j in range(Nz):
+                if mask[i, j] == 1:
+                    
+                    # --- Neighbors ---
+                    # Radial
+                    val_E = ur[min(i+1, Nr-1), j]
+                    val_W = ur[i-1, j] # if i=1, i-1=0 which is 0.0 (correct)
+
+                    # Axial
+                    if j == Nz - 1: # Symmetry
+                        val_N = ur[i, j]; c_north = 0.0
+                    else:
+                        val_N = ur[i, j+1]; c_north = inv_dz2
+
+                    if j == 0: # Wall
+                        val_S = 0.0; c_south = inv_dz2
+                    else:
+                        val_S = ur[i, j-1]; c_south = inv_dz2
+                        
+                    # --- Matrix & RHS ---
+                    mu_val = mu_grid[i, j]
+                    rho = max(nn[i, j], 1e12) * mn
+                    A_time = rho / dt
+                    
+                    A_P = A_time + mu_val * (c_east + c_west + c_north + c_south + c_self_geo)
+                    
+                    RHS = (A_time * ur[i, j]) + mu_val * (
+                        c_east * val_E + c_west * val_W + 
+                        c_north * val_N + c_south * val_S
+                    )
+                    
+                    u_new = (1.0 - omega)*ur[i, j] + omega*(RHS / A_P)
+                    
+                    diff = abs(u_new - ur[i, j])
+                    if diff > max_diff: max_diff = diff
+                    ur[i, j] = u_new
+                    
+        if max_diff < 1e-4: break
+
+@njit(cache=True)
+def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
+                                   dt, dr, dz, max_iter=20, omega=1.4):
+    """
+    Implicit Viscosity for AXIAL velocity v_z.
+    Standard Laplacian (no hoop stress).
+    BCs: r=0 -> Symmetry (dUz/dr=0), Walls -> uz=0 (No Slip)
+    """
+    Nr, Nz = uz.shape
+    inv_dr2 = 1.0 / (dr * dr)
+    inv_dz2 = 1.0 / (dz * dz)
+
+    for k in range(max_iter):
+        
+        # Enforce Axis Symmetry: uz[0] = uz[1]
+        for j_sym in range(Nz):
+            if mask[0, j_sym] == 1:
+                uz[0, j_sym] = uz[1, j_sym]
+
+        max_diff = 0.0
+        
+        for i in range(1, Nr):
+            r = i * dr
+            c_east = ((r + 0.5*dr) / r) * inv_dr2
+            c_west = ((r - 0.5*dr) / r) * inv_dr2
+            
+            for j in range(Nz):
+                if mask[i, j] == 1:
+                    
+                    # --- Neighbors ---
+                    val_E = uz[min(i+1, Nr-1), j]
+                    val_W = uz[i-1, j] # if i=1, val_W=uz[0] (which is set to uz[1])
+
+                    # Axial
+                    # For Uz, Top (Zmax) is symmetry? Or wall?
+                    # Usually Zmax is symmetry plane -> dUz/dz = 0 (or Uz=0 if it's a stagnation point)
+                    # If it's a symmetry plane, v_z must be 0 there if flow is symmetric? 
+                    # NO: Symmetry plane usually implies normal velocity is 0. 
+                    # If Zmax is "midplane", v_z should be 0 (symmetry of opposing jets) OR d/dz=0 if flow through.
+                    # Your explicit code sets uz[:,-1] = 0.0 (impermeable). Let's match that.
+                    
+                    if j == Nz - 1: 
+                        # Wall/Symmetry (Impermeable) -> Dirichlet 0
+                        val_N = 0.0; c_north = inv_dz2 
+                    else:
+                        val_N = uz[i, j+1]; c_north = inv_dz2
+
+                    if j == 0: # Wall
+                        val_S = 0.0; c_south = inv_dz2
+                    else:
+                        val_S = uz[i, j-1]; c_south = inv_dz2
+                        
+                    # --- Matrix & RHS ---
+                    mu_val = mu_grid[i, j]
+                    rho = max(nn[i, j], 1e12) * mn
+                    A_time = rho / dt
+                    
+                    # No hoop stress for Uz
+                    A_P = A_time + mu_val * (c_east + c_west + c_north + c_south)
+                    
+                    RHS = (A_time * uz[i, j]) + mu_val * (
+                        c_east * val_E + c_west * val_W + 
+                        c_north * val_N + c_south * val_S
+                    )
+                    
+                    u_new = (1.0 - omega)*uz[i, j] + omega*(RHS / A_P)
+                    
+                    diff = abs(u_new - uz[i, j])
+                    if diff > max_diff: max_diff = diff
+                    uz[i, j] = u_new
+                    
+        if max_diff < 1e-4: break
+        
+@njit(parallel=True)
+def mom_rhs_inviscid(r, rho, ur, ut, uz, p,
+                     dr, dz,
+                     rhs_r, rhs_t, rhs_z,
+                     fluid=None, face_r=None, face_z=None):
+    """
+    RHS for momentum considering ONLY:
+    1. Pressure Gradient (-grad P)
+    2. Centrifugal Force (+rho u_theta^2 / r)
+    3. Coriolis Force    (-rho u_r u_theta / r)
+    NO Viscosity.
+    """
+    Nr, Nz = rho.shape
+
+    for i in prange(1, Nr - 1):
+        ri = r[i] if r[i] > 1e-12 else 1e-12
+        inv_ri = 1.0 / ri
+
+        for k in range(1, Nz - 1):
+            if fluid is not None and fluid[i, k] == 0:
+                rhs_r[i, k] = 0.0
+                rhs_t[i, k] = 0.0
+                rhs_z[i, k] = 0.0
+                continue
+
+            # Pressure gradients
+            dp_dr = dpdr_masked(p, dr, i, k, face_r)
+            dp_dz = dpdz_masked(p, dz, i, k, face_z)
+                
+            # Centrifugal and Coriolis forces
+            curv_r = +rho[i, k] * ut[i, k]**2 * inv_ri
+            curv_t = -rho[i, k] * ur[i, k] * ut[i, k] * inv_ri
+
+            rhs_r[i, k] = -dp_dr + curv_r
+            rhs_t[i, k] =          curv_t
+            rhs_z[i, k] = -dp_dz
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def step_advection_hydro(r, dr, dz, dt,
+                         rho, ur, ut, uz, p,
+                         c_iso, rho_floor=1e-12,
+                         fluid=None, face_r=None, face_z=None):
+    """
+    Explicit RK substep for Mass + Momentum Advection + Pressure.
+    Does NOT apply viscosity.
+    """
+    Nr, Nz = rho.shape
+    
+    # 1. Compute Inviscid RHS (Pressure + Curvature)
+    rhs_r = np.zeros_like(rho)
+    rhs_t = np.zeros_like(rho)
+    rhs_z = np.zeros_like(rho)
+    
+    mom_rhs_inviscid(r, rho, ur, ut, uz, p, dr, dz, 
+                     rhs_r, rhs_t, rhs_z, 
+                     fluid, face_r, face_z)
+
+    # 2. Add Momentum Convection (Div(rho u u)) via Rusanov
+    a_r = np.abs(ur) + c_iso
+    a_z = np.abs(uz) + c_iso
+
+    div_m_r = np.zeros_like(rho); div_m_t = np.zeros_like(rho); div_m_z = np.zeros_like(rho)
+
+    rusanov_div_scalar_masked(rho*ur, ur, uz, r, dr, dz, a_r, a_z, div_m_r, face_r, face_z, fluid)
+    rusanov_div_scalar_masked(rho*ut, ur, uz, r, dr, dz, a_r, a_z, div_m_t, face_r, face_z, fluid)
+    rusanov_div_scalar_masked(rho*uz, ur, uz, r, dr, dz, a_r, a_z, div_m_z, face_r, face_z, fluid)
+
+    rhs_r[1:-1,1:-1] -= div_m_r[1:-1,1:-1]
+    rhs_t[1:-1,1:-1] -= div_m_t[1:-1,1:-1]
+    rhs_z[1:-1,1:-1] -= div_m_z[1:-1,1:-1]
+
+    # 3. Update Momenta (Explicit)
+    rho_safe = np.maximum(rho, rho_floor)
+    for i in prange(1, Nr-1):
+        for k in range(1, Nz-1):
+            if (fluid is None) or (fluid[i,k] == 1):
+                ur[i,k] += dt * rhs_r[i,k] / rho_safe[i,k]
+                ut[i,k] += dt * rhs_t[i,k] / rho_safe[i,k]
+                uz[i,k] += dt * rhs_z[i,k] / rho_safe[i,k]
+
+    # 4. Update Density (Continuity)
+    divF = np.zeros_like(rho)
+    rusanov_div_scalar_masked(rho, ur, uz, r, dr, dz, a_r, a_z, divF, face_r, face_z, fluid)
+
+    for i in prange(0, Nr):
+        for k in range(0, Nz):
+            if (fluid is None) or (fluid[i,k] == 1):
+                rho[i,k] -= dt * divF[i,k]
+                if rho[i,k] < rho_floor: rho[i,k] = rho_floor
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def step_advection_energy(r, dr, dz, dt,
+                          T, rho, ur, ut, uz, p,
+                          c_v,
+                          fluid=None, face_r=None, face_z=None,
+                          T_floor=300.0):
+    """
+    Explicit RK substep for Energy Advection + PV Work.
+    Equation: rho Cv (dT/dt + u.grad T) = -p div(u)
+    Does NOT apply Thermal Conduction or Viscous Heating.
+    """
+    Nr, Nz = T.shape
+
+    # 1. T Advection: - div(T u) + T div(u)
+    #    (Using conservative form for stability)
+    a_r = np.abs(ur)
+    a_z = np.abs(uz)
+    div_Tu = np.zeros_like(T)
+    rusanov_div_scalar_masked(T, ur, uz, r, dr, dz, a_r, a_z, div_Tu, face_r, face_z, fluid)
+
+    # 2. Velocity Divergence
+    wur = np.zeros_like(T)
+    for i in prange(Nr):
+        for k in range(Nz):   # <--- FIX 1: Added missing loop over k
+            wur[i, k] = r[i] * ur[i, k] # Pre-calc r*ur
+
+    d_wur_dr = np.zeros_like(T); duz_dz = np.zeros_like(T)
+    grad_r_masked(wur, dr, d_wur_dr, face_r)
+    grad_z_masked(uz,  dz, duz_dz,   face_z)
+
+    divu = np.zeros_like(T)
+    for i in prange(1, Nr-1):
+        ri = r[i] if r[i] > 0.0 else 1e-14
+        for k in range(Nz):   # <--- FIX 2: Added missing loop over k
+             divu[i, k] = (1.0/ri) * d_wur_dr[i, k] + duz_dz[i, k]
+
+    # 3. Update
+    rho_safe = np.maximum(rho, 1e-30)
+    inv_rho_cv = 1.0/(rho_safe*c_v)
+
+    for i in prange(1, Nr-1):
+        for k in range(1, Nz-1):
+            if fluid is not None and fluid[i,k] == 0:
+                continue
+            
+            # Advection term: -div(Tu) + T*div(u)
+            adv = -div_Tu[i,k] + T[i,k]*divu[i,k]
+            
+            # PV Work term: -p div(u)
+            pv_work = -p[i,k] * divu[i,k]
+            
+            T[i,k] += dt * (adv + pv_work * inv_rho_cv[i,k])
+            
+            if T[i,k] < T_floor: T[i,k] = T_floor
+
 
 #############################################################################################
 ######################### THE KERNELS BELOW ARE TO TEST IMPLICIT UPDATES ####################
@@ -905,7 +1205,7 @@ def update_neutral_vtheta_implicit_source(un_theta, vi_theta,
 @njit(cache=True)
 def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn, 
                                         nu_en, nu_in, 
-                                        me, mi, mn, dt, mask):
+                                        me, mi, mn, dt, mask, Cv):
     """
     Updates Neutral Temperature (Tn) using a Semi-Implicit collisional operator.
     Ensures Tn approaches the plasma temperature stably without overshoot.
@@ -932,10 +1232,7 @@ def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn,
                 # Local variables
                 n_n = max(nn[i, j], 1e10)
                 n_e = max(ne[i, j], 1e10) # Assuming ni ~ ne
-                
-                # Heat Capacity of Neutrals (3/2 n k)
-                Cv = 1.5 * n_n * kb
-                
+                                
                 # Calculate "Stiffness" (Relaxation Rates [W/K/m3])
                 # Q = K * (T_plasma - Tn)
                 # K_en = 3 * (me/mn) * ne * nu_en * k

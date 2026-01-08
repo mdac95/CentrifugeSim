@@ -290,8 +290,131 @@ class NeutralFluidContainer:
         # z = L wall: Neumann (symmetry plane so no flux)
         self.T_n_grid[:,-1] = self.T_n_grid[:,-2]
 
+
     ###########################################################################################
-    ### Methods used when fluid ions are on (not kinetic ions)
+    ### methods for Implicit navier stokes (no test)
+    ###########################################################################################
+    def advance_semi_implicit(self, geom, dt, c_iso, apply_bc_vel, apply_bc_temp, 
+                              ion_fluid=None, electron_fluid=None):
+        """
+        Advances the neutral fluid using Operator Splitting with HYDRO SUB-CYCLING.
+        1. Sub-cycled Explicit Advection (Hydro + Energy) to handle acoustic CFL.
+        2. Implicit Collisions (Source).
+        3. Implicit Diffusion (Viscosity + Conduction).
+        """
+        r, dr, dz = geom.r, geom.dr, geom.dz
+
+        # ==========================================================
+        # STEP A: EXPLICIT ADVECTION (Hydro + Energy Transport)
+        # ==========================================================
+        # 1. Calculate stable timestep for hydro
+        dt_stability_limit = neutral_fluid_helper.stable_adv_dt(
+                                self.fluid,
+                                geom.r, geom.dr, geom.dz,
+                                self.un_r_grid,
+                                self.un_z_grid,
+                                c_iso,
+                                safety=0.5)
+        
+        # 2. Determine number of sub-steps needed
+        n_substeps = int(np.ceil(dt / dt_stability_limit))
+        if n_substeps < 1: n_substeps = 1
+        
+        # (Optional) Cap sub-steps if things go wild, e.g. max 50
+        # if n_substeps > 50: n_substeps = 50 
+        
+        dt_sub = dt / n_substeps
+        
+        # 3. Run Sub-cycling Loop
+        for s in range(n_substeps):
+            
+            # --- Store state U^n for RK2 ---
+            rho0 = self.rho_grid.copy()
+            ur0  = self.un_r_grid.copy()
+            ut0  = self.un_theta_grid.copy()
+            uz0  = self.un_z_grid.copy()
+            T0   = self.T_n_grid.copy()
+
+            # --- RK Stage 1 ---
+            neutral_fluid_helper.step_advection_hydro(r, dr, dz, dt_sub,
+                        self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+                        self.p_grid, c_iso, self.nn_floor*self.mass,
+                        self.fluid, self.face_r, self.face_z)
+            
+            neutral_fluid_helper.step_advection_energy(r, dr, dz, dt_sub,
+                        self.T_n_grid, self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+                        self.p_grid, self.c_v,
+                        self.fluid, self.face_r, self.face_z)
+            
+            self.update_p() 
+            apply_bc_vel(); apply_bc_temp()
+
+            # --- RK Stage 2 ---
+            neutral_fluid_helper.step_advection_hydro(r, dr, dz, dt_sub,
+                        self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+                        self.p_grid, c_iso, self.nn_floor*self.mass,
+                        self.fluid, self.face_r, self.face_z)
+            
+            neutral_fluid_helper.step_advection_energy(r, dr, dz, dt_sub,
+                        self.T_n_grid, self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+                        self.p_grid, self.c_v,
+                        self.fluid, self.face_r, self.face_z)
+
+            # --- Average (SSP-RK2) ---
+            self.rho_grid[:]       = 0.5 * (rho0 + self.rho_grid)
+            self.un_r_grid[:]      = 0.5 * (ur0  + self.un_r_grid)
+            self.un_theta_grid[:]  = 0.5 * (ut0  + self.un_theta_grid)
+            self.un_z_grid[:]      = 0.5 * (uz0  + self.un_z_grid)
+            self.T_n_grid[:]       = 0.5 * (T0   + self.T_n_grid)
+            
+            self.update_p()
+            apply_bc_vel(); apply_bc_temp()
+
+
+        # ==========================================================
+        # STEP B: IMPLICIT COLLISIONS (Source) - ONCE PER GLOBAL STEP
+        # ==========================================================
+        if ion_fluid is not None:
+             self.update_u_in_collisions_implicit(geom, ion_fluid, dt)
+        
+        if (ion_fluid is not None) and (electron_fluid is not None):
+             self.update_temperature_collisions_implicit(ion_fluid, electron_fluid, geom, dt)
+
+        # ==========================================================
+        # STEP C: IMPLICIT DIFFUSION (Sink) - ONCE PER GLOBAL STEP
+        # ==========================================================
+        mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
+             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
+        )
+        self.mu_grid[:,:] = mu_val
+        self.kappa_grid[:,:] = kappa_val
+
+        # Viscosity
+        neutral_fluid_helper.solve_implicit_viscosity_sor(
+            self.un_theta_grid, self.nn_grid, self.mass, self.fluid, self.mu_grid,
+            dt, dr, dz, max_iter=20, omega=1.4
+        )
+        neutral_fluid_helper.solve_implicit_viscosity_r_sor(
+            self.un_r_grid, self.nn_grid, self.mass, self.fluid, self.mu_grid,
+            dt, dr, dz, max_iter=20, omega=1.4
+        )
+        neutral_fluid_helper.solve_implicit_viscosity_z_sor(
+            self.un_z_grid, self.nn_grid, self.mass, self.fluid, self.mu_grid,
+            dt, dr, dz, max_iter=20, omega=1.4
+        )
+
+        # Thermal Conduction
+        neutral_fluid_helper.solve_implicit_heat_sor(
+            self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
+            dt, dr, dz, max_iter=20, omega=1.4
+        )
+        
+        self.update_p()
+        apply_bc_vel(); apply_bc_temp()
+
+        
+    ###########################################################################################
+    ### Methods used when fluid ions are on - test functions for implicit, not final (not kinetic ions)
     ###########################################################################################
 
     # To test temperature update implicit due to collisions
@@ -311,7 +434,8 @@ class NeutralFluidContainer:
             ion_fluid.m_i,
             self.mass,              # Neutral mass
             dt,
-            geom.mask
+            geom.mask,
+            self.c_v
         )
 
     def update_u_in_collisions_implicit(self, geom, ion_fluid, dt):
