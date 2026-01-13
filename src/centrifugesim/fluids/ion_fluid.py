@@ -118,7 +118,9 @@ class IonFluidContainer:
             self.Z,
             self.m_i,
             self.sigma_cx,
-            geom.mask
+            geom.mask,
+            self.vi_theta_grid,
+            neutral_fluid.un_theta_grid
         )
 
     def update_beta_i(self, geom, hybrid_pic):

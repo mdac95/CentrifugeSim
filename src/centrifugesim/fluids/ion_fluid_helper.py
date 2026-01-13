@@ -379,7 +379,7 @@ def update_vtheta_kernel_algebraic(vtheta_out, Jir, Bz, ni, nu_in, un_theta, mas
                 vtheta_out[i, j] = 0.0
 
 @njit(cache=True)
-def compute_nu_i_kernel(nu_i_out, ni, Ti, nn, Tn, Z, mi, sigma_cx, mask):
+def compute_nu_i_kernel(nu_i_out, ni, Ti, nn, Tn, Z, mi, sigma_cx, mask, vi_t, un_t):
     """
     Computes total ion collision frequency: nu_i = nu_ii + nu_in
     Currently only includes nu_in via charge exchange.
@@ -391,9 +391,8 @@ def compute_nu_i_kernel(nu_i_out, ni, Ti, nn, Tn, Z, mi, sigma_cx, mask):
     kb = constants.kb    
 
     # --- Pre-calculate Constants for nu_in ---
-    # Relative thermal velocity factor: sqrt( 8*kB / (pi*mi) ) * sqrt(Ti + Tn)
     # Assuming mi approx mn
-    factor_in = np.sqrt(8.0 * kb / (np.pi * mi))
+    factor_in = 8.0 * kb / (np.pi * mi)
 
     min_T = 300.0 # Avoid division by zero temperature
 
@@ -408,9 +407,19 @@ def compute_nu_i_kernel(nu_i_out, ni, Ti, nn, Tn, Z, mi, sigma_cx, mask):
                     Ti_val = max(Ti[i, j], min_T)
                     Tn_val = max(Tn[i, j], min_T)
                     nn_val = nn[i, j]
+                    
+                    # Thermal part squared
+                    v_thermal_sq = factor_in * (Ti_val + Tn_val)
+
+                    # Relative velocity part squared
+                    v_slip = vi_t[i, j] - un_t[i, j]
+                    v_slip_sq = v_slip * v_slip
+                    v_slip_sq*=0.0
+                    
+                    # Total relative velocity
+                    v_rel = np.sqrt(v_thermal_sq + v_slip_sq)
 
                     # 2. Charge Exchange (nu_in)
-                    v_rel = factor_in * np.sqrt(Ti_val + Tn_val)
                     nu_in = nn_val * sigma_cx * v_rel
 
                     nu_i_out[i, j] = nu_in
@@ -533,7 +542,7 @@ def update_Ti_joule_heating_kernel(Ti_out, Tn, Te,
 @njit(cache=True)
 def solve_vtheta_viscous_SOR(vtheta, Jr, Bz, ni, nu_in, un_theta, eta, 
                              mask, dr, dz, r_coords, mi, 
-                             max_iter=2000, tol=1e-5, omega=1.4):
+                             max_iter=10000, tol=1e-5, omega=1.4):
     """
     Solves steady-state viscous momentum equation using SOR (Successive Over-Relaxation).
     

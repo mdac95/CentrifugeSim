@@ -507,8 +507,6 @@ def apply_townsend_ionization_sheath(p_grid,
     return dni_Townsend
 
 
-# TO DO:
-# use electron fluid ne_floor instead
 @njit(cache=True)
 def time_advance_ne_analytic_kernel_anisotropic(ne_out, ne_old, 
                                                 nu_iz, nu_loss, nu_RR, beta_rec, 
@@ -780,7 +778,7 @@ def update_Te_local_physics(Te, ne, nn, T_n, T_i,
 @njit(cache=True)
 def solve_Te_diffusion_implicit_SOR(Te, ne, kappa_par, kappa_perp, 
                                     br, bz, mask, dr, dz, r_coords, dt, 
-                                    mi, Te_floor, max_iter=2000, tol=1e-4, omega=0.9):
+                                    mi, Te_floor, max_iter=5000, tol=1e-4, omega=0.6):
     """
     Implicit Heat Diffusion Solver (SOR).
     Updates:

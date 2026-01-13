@@ -402,7 +402,8 @@ class ElectronFluidContainer:
                            Q_Joule_e_grid, 
                            delta_E_eV_ionization, dt, 
                            chem_T_array, chem_k_array,
-                           q_RF_grid=None):
+                           q_RF_grid=None,
+                           max_iter=5000):
         """
         Implicit update for Electron Temperature.
         Allows large timesteps by splitting Local Physics and Global Transport.
@@ -456,7 +457,8 @@ class ElectronFluidContainer:
             r_coords,
             dt,
             ion_fluid.m_i, # Use ion mass for Bohm speed
-            self.Te_floor
+            self.Te_floor,
+            max_iter=max_iter
         )
         
         # 5. Boundary Conditions (Enforce Dirichlet if any)
