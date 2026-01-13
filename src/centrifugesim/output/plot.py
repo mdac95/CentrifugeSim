@@ -47,3 +47,4 @@ def plot_field(data, geom, title, cbar_label,
         print(f"Saved: {filename}")
     
     plt.show()
+    plt.close()

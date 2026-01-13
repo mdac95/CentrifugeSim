@@ -319,10 +319,7 @@ class NeutralFluidContainer:
         # 2. Determine number of sub-steps needed
         n_substeps = int(np.ceil(dt / dt_stability_limit))
         if n_substeps < 1: n_substeps = 1
-        
-        # (Optional) Cap sub-steps if things go wild, e.g. max 50
-        # if n_substeps > 50: n_substeps = 50 
-        
+                
         dt_sub = dt / n_substeps
         
         # 3. Run Sub-cycling Loop
@@ -389,24 +386,34 @@ class NeutralFluidContainer:
         self.mu_grid[:,:] = mu_val
         self.kappa_grid[:,:] = kappa_val
 
+        # Viscous Heating (EXPLICIT)
+        neutral_fluid_helper.add_viscous_heating(
+            self.T_n_grid, self.rho_grid,
+            self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+            self.mu_grid, self.c_v,
+            dr, dz, dt, 
+            self.fluid, self.face_r, self.face_z
+        )
+
         # Viscosity
+        # Note: should I combine all these kernel calls into one to save some time?
         neutral_fluid_helper.solve_implicit_viscosity_sor(
             self.un_theta_grid, self.nn_grid, self.mass, self.fluid, self.mu_grid,
-            dt, dr, dz, max_iter=20, omega=1.4
+            dt, dr, dz, max_iter=200, omega=1.8
         )
         neutral_fluid_helper.solve_implicit_viscosity_r_sor(
             self.un_r_grid, self.nn_grid, self.mass, self.fluid, self.mu_grid,
-            dt, dr, dz, max_iter=20, omega=1.4
+            dt, dr, dz, max_iter=200, omega=1.8
         )
         neutral_fluid_helper.solve_implicit_viscosity_z_sor(
             self.un_z_grid, self.nn_grid, self.mass, self.fluid, self.mu_grid,
-            dt, dr, dz, max_iter=20, omega=1.4
+            dt, dr, dz, max_iter=200, omega=1.8
         )
 
         # Thermal Conduction
         neutral_fluid_helper.solve_implicit_heat_sor(
             self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
-            dt, dr, dz, max_iter=20, omega=1.4
+            dt, dr, dz, max_iter=200, omega=1.8
         )
         
         self.update_p()
@@ -422,6 +429,15 @@ class NeutralFluidContainer:
         """
         Updates T_gas implicitly based on elastic collisions with Electrons and Ions.
         """
+        # Add Frictional Heating due to ion-neutral slip (Explicit)
+        neutral_fluid_helper.add_ion_neutral_frictional_heating(
+            self.T_n_grid,
+            self.un_theta_grid, ion_fluid.vi_theta_grid,
+            ion_fluid.ni_grid, self.nn_grid, ion_fluid.nu_i_grid,
+            ion_fluid.m_i, self.mass, self.c_v, dt, geom.mask
+        )
+
+        # Apply Thermal Relaxation (Implicit)
         neutral_fluid_helper.update_neutral_temperature_implicit(
             self.T_n_grid,          # In/Out: Updated in place
             electron_fluid.Te_grid,
@@ -467,7 +483,7 @@ class NeutralFluidContainer:
             self.nn_grid,
             self.mass,
             self.fluid,      # The mask
-            self.mu_grid,    # NEW: Passing the field
+            self.mu_grid,
             dt,
             geom.dr,
             geom.dz,
@@ -481,8 +497,8 @@ class NeutralFluidContainer:
             self.nn_grid,
             self.mass,
             self.fluid,
-            self.kappa_grid, # NEW: Passing the field
-            self.c_v,        # NEW: Passing scalar c_v
+            self.kappa_grid,
+            self.c_v,
             dt,
             geom.dr,
             geom.dz,
@@ -493,3 +509,52 @@ class NeutralFluidContainer:
         self.apply_bc_T()
         self.apply_bc_isothermal()
 
+    #######################################################################################################
+    ####################################### TO CALCULATE PARAMS ###########################################
+    #######################################################################################################
+    def get_viscous_heating_timescale_field(self, geom):
+        """
+        Computes the local viscous heating timescale field:
+            tau_heat(r,z) = (rho * Cv * T) / Phi(r,z)
+        """
+        # 1. Get Fields
+        rho = self.rho_grid
+        T   = self.T_n_grid
+        mu  = self.mu_grid
+        vt  = self.un_theta_grid
+        
+        # 2. Compute Gradients
+        r_safe = geom.r.copy()
+        r_safe[0] = 1.0 # Avoid divide by zero
+        
+        # FIX 1: Reshape r_safe to (Nr, 1) for broadcasting against (Nr, Nz)
+        r_col = r_safe[:, None] 
+        
+        # Calculate Angular Velocity Omega = v / r
+        omega = vt / r_col
+        
+        # Gradient along axis 0 (Radial)
+        d_omega_dr = np.gradient(omega, geom.dr, axis=0)
+        
+        # FIX 2: Use the reshaped column r for the shear calculation too
+        shear_r = r_col * d_omega_dr
+        
+        # Axial Shear: d(v)/dz
+        shear_z = np.gradient(vt, geom.dz, axis=1)
+        
+        # 3. Compute Local Dissipation Phi [W/m^3]
+        Phi_grid = mu * (shear_r**2 + shear_z**2)
+        
+        # 4. Compute Timescale
+        E_thermal = rho * self.c_v * T
+        
+        tau_grid = np.zeros_like(T)
+        
+        # Avoid divide by zero / valid mask
+        mask_valid = (geom.mask == 1)
+        tau_grid[mask_valid] = E_thermal[mask_valid] / Phi_grid[mask_valid]
+        
+        # Set regions with no heating to a large number
+        tau_grid[~mask_valid] = 1e9 
+
+        return tau_grid, Phi_grid

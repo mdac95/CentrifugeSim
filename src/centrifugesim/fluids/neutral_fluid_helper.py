@@ -884,7 +884,7 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
         max_diff = 0.0
         
         # Start at i=1 because ur[0,:] is always 0 (axis)
-        for i in range(1, Nr):
+        for i in range(1, Nr-1):
             r = i * dr
             
             # Geometric coeffs
@@ -892,21 +892,21 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
             c_west = ((r - 0.5*dr) / r) * inv_dr2
             c_self_geo = 1.0 / (r * r) # Hoop stress term for vr
 
-            for j in range(Nz):
+            for j in range(1, Nz):
                 if mask[i, j] == 1:
                     
                     # --- Neighbors ---
                     # Radial
-                    val_E = ur[min(i+1, Nr-1), j]
-                    val_W = ur[i-1, j] # if i=1, i-1=0 which is 0.0 (correct)
+                    val_E = ur[i+1, j] 
+                    val_W = ur[i-1, j]
 
                     # Axial
-                    if j == Nz - 1: # Symmetry
+                    if j == Nz - 1: # Top Symmetry/Slip
                         val_N = ur[i, j]; c_north = 0.0
                     else:
                         val_N = ur[i, j+1]; c_north = inv_dz2
 
-                    if j == 0: # Wall
+                    if j == 0: # Bottom Wall (Should be skipped by loop, but safe fallback)
                         val_S = 0.0; c_south = inv_dz2
                     else:
                         val_S = ur[i, j-1]; c_south = inv_dz2
@@ -929,7 +929,7 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
                     if diff > max_diff: max_diff = diff
                     ur[i, j] = u_new
                     
-        if max_diff < 1e-4: break
+        if max_diff < 1e-5: break # Tighter tolerance for high iterations
 
 @njit(cache=True)
 def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
@@ -952,43 +952,32 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
 
         max_diff = 0.0
         
-        for i in range(1, Nr):
+        for i in range(1, Nr-1):
             r = i * dr
             c_east = ((r + 0.5*dr) / r) * inv_dr2
             c_west = ((r - 0.5*dr) / r) * inv_dr2
             
-            for j in range(Nz):
+            for j in range(1, Nz-1):
                 if mask[i, j] == 1:
                     
                     # --- Neighbors ---
-                    val_E = uz[min(i+1, Nr-1), j]
-                    val_W = uz[i-1, j] # if i=1, val_W=uz[0] (which is set to uz[1])
+                    # Radial
+                    val_E = uz[i+1, j]
+                    val_W = uz[i-1, j] 
 
                     # Axial
-                    # For Uz, Top (Zmax) is symmetry? Or wall?
-                    # Usually Zmax is symmetry plane -> dUz/dz = 0 (or Uz=0 if it's a stagnation point)
-                    # If it's a symmetry plane, v_z must be 0 there if flow is symmetric? 
-                    # NO: Symmetry plane usually implies normal velocity is 0. 
-                    # If Zmax is "midplane", v_z should be 0 (symmetry of opposing jets) OR d/dz=0 if flow through.
-                    # Your explicit code sets uz[:,-1] = 0.0 (impermeable). Let's match that.
+                    # j+1 and j-1 are safe because we iterate 1..Nz-2
+                    val_N = uz[i, j+1]
+                    val_S = uz[i, j-1]
                     
-                    if j == Nz - 1: 
-                        # Wall/Symmetry (Impermeable) -> Dirichlet 0
-                        val_N = 0.0; c_north = inv_dz2 
-                    else:
-                        val_N = uz[i, j+1]; c_north = inv_dz2
-
-                    if j == 0: # Wall
-                        val_S = 0.0; c_south = inv_dz2
-                    else:
-                        val_S = uz[i, j-1]; c_south = inv_dz2
+                    c_north = inv_dz2
+                    c_south = inv_dz2
                         
                     # --- Matrix & RHS ---
                     mu_val = mu_grid[i, j]
                     rho = max(nn[i, j], 1e12) * mn
                     A_time = rho / dt
                     
-                    # No hoop stress for Uz
                     A_P = A_time + mu_val * (c_east + c_west + c_north + c_south)
                     
                     RHS = (A_time * uz[i, j]) + mu_val * (
@@ -1002,7 +991,7 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
                     if diff > max_diff: max_diff = diff
                     uz[i, j] = u_new
                     
-        if max_diff < 1e-4: break
+        if max_diff < 1e-5: break
         
 @njit(parallel=True)
 def mom_rhs_inviscid(r, rho, ur, ut, uz, p,
@@ -1119,7 +1108,7 @@ def step_advection_energy(r, dr, dz, dt,
     # 2. Velocity Divergence
     wur = np.zeros_like(T)
     for i in prange(Nr):
-        for k in range(Nz):   # <--- FIX 1: Added missing loop over k
+        for k in range(Nz):
             wur[i, k] = r[i] * ur[i, k] # Pre-calc r*ur
 
     d_wur_dr = np.zeros_like(T); duz_dz = np.zeros_like(T)
@@ -1129,7 +1118,7 @@ def step_advection_energy(r, dr, dz, dt,
     divu = np.zeros_like(T)
     for i in prange(1, Nr-1):
         ri = r[i] if r[i] > 0.0 else 1e-14
-        for k in range(Nz):   # <--- FIX 2: Added missing loop over k
+        for k in range(Nz):
              divu[i, k] = (1.0/ri) * d_wur_dr[i, k] + duz_dz[i, k]
 
     # 3. Update
@@ -1150,6 +1139,61 @@ def step_advection_energy(r, dr, dz, dt,
             T[i,k] += dt * (adv + pv_work * inv_rho_cv[i,k])
             
             if T[i,k] < T_floor: T[i,k] = T_floor
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def add_viscous_heating(T, rho, ur, ut, uz, mu, c_v, dr, dz, dt, 
+                        fluid=None, face_r=None, face_z=None):
+    """
+    Computes viscous dissipation Phi = tau : grad(u) and adds 
+    dT = dt * Phi / (rho * Cv) to the temperature field.
+    """
+    Nr, Nz = T.shape
+    
+    # We need derivatives of velocity
+    dur_dr = np.zeros_like(T); grad_r_masked(ur, dr, dur_dr, face_r)
+    dut_dr = np.zeros_like(T); grad_r_masked(ut, dr, dut_dr, face_r)
+    duz_dz = np.zeros_like(T); grad_z_masked(uz, dz, duz_dz, face_z)
+    dut_dz = np.zeros_like(T); grad_z_masked(ut, dz, dut_dz, face_z)
+    
+    # Cross terms
+    uz_r = np.zeros_like(T); grad_r_masked(uz, dr, uz_r, face_r)
+    ur_z = np.zeros_like(T); grad_z_masked(ur, dz, ur_z, face_z)
+    
+    for i in prange(1, Nr-1):
+        ri = (i * dr)
+        inv_ri = 1.0 / ri
+        
+        for k in range(1, Nz-1):
+            if fluid is not None and fluid[i, k] == 0:
+                continue
+                
+            # 1. Divergence of u (for bulk viscosity/compressible terms)
+            divu = dur_dr[i, k] + (ur[i, k] * inv_ri) + duz_dz[i, k]
+            
+            # 2. Strain rates & Stresses (Standard Newtonian)
+            lam = -2.0/3.0 * mu[i, k]
+            
+            tau_rr = 2*mu[i, k]*dur_dr[i, k] + lam*divu
+            tau_tt = 2*mu[i, k]*(ur[i, k]*inv_ri) + lam*divu
+            tau_zz = 2*mu[i, k]*duz_dz[i, k] + lam*divu
+            
+            tau_rz = mu[i, k]*(uz_r[i, k] + ur_z[i, k])
+            tau_rt = mu[i, k]*(dut_dr[i, k] - ut[i, k]*inv_ri)
+            tau_tz = mu[i, k]*dut_dz[i, k]
+            
+            # 3. Dissipation Function Phi = Tau : Grad(u)
+            Phi = (
+                tau_rr * dur_dr[i, k] +
+                tau_tt * (ur[i, k] * inv_ri) +
+                tau_zz * duz_dz[i, k] +
+                tau_rz * (uz_r[i, k] + ur_z[i, k]) +
+                tau_rt * (dut_dr[i, k] - ut[i, k] * inv_ri) +
+                tau_tz * dut_dz[i, k]
+            )
+            
+            # Update Temperature with Safety Clamp
+            T[i, k] += dt * Phi / (rho[i, k] * c_v)
 
 
 #############################################################################################
@@ -1208,20 +1252,11 @@ def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn,
                                         me, mi, mn, dt, mask, Cv):
     """
     Updates Neutral Temperature (Tn) using a Semi-Implicit collisional operator.
-    Ensures Tn approaches the plasma temperature stably without overshoot.
-    
-    Energy Equation:
-      Cv * dTn/dt = Q_en + Q_in
-      Q_en = 3 * (me/mn) * ne * nu_en * k * (Te - Tn)
-      Q_in = 3 * (mi/mn) * ni * nu_in * k * (Ti - Tn)
-      
-    Implicit Update:
-      Tn_new = (Tn_old + dt * Rate * T_target) / (1 + dt * Rate)
     """
     Nr, Nz = Tn.shape
     kb = constants.kb
     
-    # 3.0 factor comes from thermal relaxation rate definitions for Maxwellian species
+    # 3.0 factor for Maxwellian thermal relaxation
     coeff_en = 3.0 * (me / mn) * kb
     coeff_in = 3.0 * (mi / mn) * kb
     
@@ -1230,36 +1265,63 @@ def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn,
             if mask[i, j] == 1:
                 
                 # Local variables
-                n_n = max(nn[i, j], 1e10)
-                n_e = max(ne[i, j], 1e10) # Assuming ni ~ ne
-                                
-                # Calculate "Stiffness" (Relaxation Rates [W/K/m3])
-                # Q = K * (T_plasma - Tn)
-                # K_en = 3 * (me/mn) * ne * nu_en * k
+                n_n = nn[i, j]
+                n_e = ne[i, j]
                 
+                # 1. Calculate Heat Transfer Coefficients [W / (m^3 K)]
                 K_en = coeff_en * n_e * nu_en[i, j]
-                K_in = coeff_in * n_e * nu_in[i, j] # Using ne approx ni
+                K_in = coeff_in * n_e * nu_in[i, j] 
                 
                 K_total = K_en + K_in
                 
-                # Total Weighted Target Temperature
-                # (K_en * Te + K_in * Ti) / K_total
-                if K_total > 1e-30:
+                if K_total > 0.0:
+                    # Target Weighted Temperature
                     T_target = (K_en * Te[i, j] + K_in * Ti[i, j]) / K_total
                     
-                    # Effective Relaxation Frequency for Neutrals [1/s]
-                    # nu_relax = K_total / Cv
-                    nu_relax = K_total / Cv
+                    # 2. Calculate Relaxation Frequency [1/s]
+                    # FIX: Divide by Volumetric Heat Capacity (rho * Cv)
+                    rho_n = n_n * mn
+                    vol_Cv = rho_n * Cv
                     
-                    # Implicit Update
+                    nu_relax = K_total / vol_Cv
+                    
+                    # 3. Implicit Update
                     # Tn_new = (Tn_old + dt * nu * T_target) / (1 + dt * nu)
                     numerator = Tn[i, j] + dt * nu_relax * T_target
                     denominator = 1.0 + dt * nu_relax
                     
                     Tn[i, j] = numerator / denominator
-                
-                # (Else: No collision coupling, Tn stays same)
 
+@njit(parallel=True, cache=True)
+def add_ion_neutral_frictional_heating(Tn, un_t, vi_t,
+                                       ni, nn, nu_in,
+                                       mi, mn, Cv, dt, mask):
+    """
+    Explicitly adds Frictional Heating (Slip Heating) to Neutrals.
+    Q = rho_i * nu_in * |v_i - v_n|^2
+    dT = dt * Q / (rho_n * Cv)
+    """
+    Nr, Nz = Tn.shape
+    
+    for i in prange(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                rho_n = nn[i, j] * mn
+                rho_i = ni[i, j] * mi
+                
+                if rho_n > 1e-20:
+                    # Squared Slip Velocity
+                    dv2 = (vi_t[i, j] - un_t[i, j])**2 
+                          
+                    # Heating Source [W/m^3]
+                    # For Charge Exchange, the energy transfer is efficient.
+                    # Q ~ rho_i * nu_in * dv^2
+                    Q_fric = rho_i * nu_in[i, j] * dv2
+                    
+                    # Temperature Increment
+                    dT = dt * Q_fric / (rho_n * Cv)                        
+                    Tn[i, j] += dT
+                    
 @njit(cache=True)
 def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid,
                                  dt, dr, dz, max_iter=20, omega=1.4):
@@ -1292,7 +1354,7 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid,
                     # --- 1. Identify Neighbors ---
                     # Radial
                     if i == Nr - 1:
-                        val_E = un_theta[i, j] # Wall fallback
+                        val_E = 0.0  # No-Slip (Stationary Wall)
                     else:
                         val_E = un_theta[i+1, j]
                     
@@ -1349,8 +1411,7 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid,
 def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                             dt, dr, dz, max_iter=20, omega=1.4):
     """
-    Solves for Neutral Temperature Diffusion implicitly using kappa_grid.
-    Uses c_v (scalar J/kg/K) to calculate volumetric heat capacity.
+    Solves Neutral Temperature Diffusion.
     """
     Nr, Nz = Tn.shape
     
@@ -1364,63 +1425,55 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
             if mask[0, j_sym] == 1:
                 Tn[0, j_sym] = Tn[1, j_sym]
 
-        for i in range(1, Nr):
+        max_diff = 0.0
+
+        # FIX: Iterate only up to Nr-1 (Excluding the outer wall)
+        for i in range(1, Nr - 1):
             r = i * dr
-            r_plus = r + 0.5 * dr
-            r_minus = r - 0.5 * dr
             
-            c_east = (r_plus / r) * inv_dr2
-            c_west = (r_minus / r) * inv_dr2
+            c_east = ((r + 0.5*dr) / r) * inv_dr2
+            c_west = ((r - 0.5*dr) / r) * inv_dr2
             
-            for j in range(Nz):
+            # FIX: Iterate only up to Nz-1 (Excluding top/bottom walls)
+            # Assuming Top/Bottom are also Dirichlet or fixed by BCs
+            for j in range(1, Nz - 1):
                 if mask[i, j] == 1:
                     
                     # --- Neighbors ---
                     # Radial
-                    if i == Nr - 1:
-                        val_E = Tn[i, j] # Fallback
-                        if i+1 < Nr: val_E = Tn[i+1, j]
-                    else:
-                        val_E = Tn[i+1, j]
-                        
+                    # i+1 is safe and valid because we stop at Nr-2
+                    # Tn[i+1] will hold the Fixed Wall Temp (300K)
+                    val_E = Tn[i+1, j] 
                     val_W = Tn[i-1, j]
 
                     # Axial
-                    if j == Nz - 1: # Symmetry
-                        val_N = Tn[i, j]
-                        c_north = 0.0
-                    else:
-                        val_N = Tn[i, j+1]
-                        c_north = inv_dz2
-
-                    if j == 0: # Wall
-                        val_S = 300.0 
-                        c_south = inv_dz2
-                    else:
-                        val_S = Tn[i, j-1]
-                        c_south = inv_dz2
+                    val_N = Tn[i, j+1]
+                    val_S = Tn[i, j-1]
+                    
+                    c_north = inv_dz2
+                    c_south = inv_dz2
 
                     # --- Matrix Setup ---
-                    # Use local field values
                     kappa_val = kappa_grid[i, j]
                     
-                    # Heat Capacity per volume = rho * c_v (J/m^3/K)
-                    rho = max(nn[i, j], 1e12) * mn
+                    rho = nn[i, j] * mn
                     Cv_vol = rho * c_v
-                    
                     A_time = Cv_vol / dt
                     
                     A_P = A_time + kappa_val * (c_east + c_west + c_north + c_south)
                     
                     RHS = (A_time * Tn[i, j]) + kappa_val * (
-                        c_east * val_E + 
-                        c_west * val_W + 
-                        c_north * val_N + 
-                        c_south * val_S
+                        c_east * val_E + c_west * val_W + 
+                        c_north * val_N + c_south * val_S
                     )
                     
                     # --- SOR Update ---
                     T_star = RHS / A_P
                     T_new = (1.0 - omega) * Tn[i, j] + omega * T_star
                     
+                    diff = abs(T_new - Tn[i, j])
+                    if diff > max_diff: max_diff = diff
+                    
                     Tn[i, j] = T_new
+                    
+        if max_diff < 1e-4: break
