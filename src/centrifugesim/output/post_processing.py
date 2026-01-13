@@ -66,9 +66,9 @@ def separation_factor_map_integral(
             trap = 0.5 * (ff[1:] + ff[:-1]) * dr
             lnalpha_col[i_start+1:i1+1] = np.cumsum(trap)
 
-        # User request: alpha = 0 on axis where it's fluid
+        # User request: alpha = 1 on axis where it's fluid
         if valid[0]:
-            alpha[0, iz] = 0.0
+            alpha[0, iz] = 1.0
 
         # Fill alpha on valid nodes i>=1 from exp(lnalpha_col)
         alpha[1:, iz] = np.where(valid[1:], np.exp(lnalpha_col[1:]), np.nan)
