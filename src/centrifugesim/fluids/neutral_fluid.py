@@ -250,25 +250,25 @@ class NeutralFluidContainer:
         self.un_r_grid[0,:]  = 0.0                 # odd
         self.un_theta_grid[0,:]  = 0.0                 # odd
         self.un_z_grid[0,:]  = self.un_z_grid[1,:]             # ∂r uz = 0
-        self.p_grid[0,:]   = self.p_grid[1,:]              # ∂r p   = 0
+        #self.p_grid[0,:]   = self.p_grid[1,:]              # ∂r p   = 0
 
         # --- Radial wall r = R (i = Nr-1): no-slip, impermeable ---
         self.un_r_grid[-1,:] = 0.0
         self.un_theta_grid[-1,:] = 0.0
         self.un_z_grid[-1,:] = 0.0
-        self.p_grid[-1,:] = self.p_grid[-2,:]
+        #self.p_grid[-1,:] = self.p_grid[-2,:]
 
         # --- Bottom plate z = 0 (k = 0): no-slip, impermeable ---
         self.un_r_grid[:,0] = 0.0
         self.un_theta_grid[:,0] = 0.0
         self.un_z_grid[:,0] = 0.0
-        self.p_grid[:,0] = self.p_grid[:,1]
+        #self.p_grid[:,0] = self.p_grid[:,1]
 
         # --- Top plate z = L (k = Nz-1): no-slip, impermeable ---
         self.un_r_grid[:,-1] = self.un_r_grid[:,-2]
         self.un_theta_grid[:,-1] = self.un_theta_grid[:,-2]
         self.un_z_grid[:,-1] = 0.0
-        self.p_grid[:,-1] = self.p_grid[:,-2]
+        #self.p_grid[:,-1] = self.p_grid[:,-2]
 
         # no slip solid surfaces inside domain
         self.un_r_grid[self.i_bc_list, self.j_bc_list] = 0.0
