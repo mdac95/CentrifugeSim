@@ -873,12 +873,13 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
                                    dt, dr, dz, max_iter=20, omega=1.4):
     """
     Implicit Viscosity for RADIAL velocity v_r.
-    Includes -v_r/r^2 term (hoop stress).
-    BCs: r=0 -> ur=0 (Geometric), Walls -> ur=0 (No Slip)
     """
     Nr, Nz = ur.shape
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
+
+    # 1. Create a copy for the Source Term (Inertia)
+    ur_old = ur.copy()
 
     for k in range(max_iter):
         max_diff = 0.0
@@ -896,7 +897,6 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
                 if mask[i, j] == 1:
                     
                     # --- Neighbors ---
-                    # Radial
                     val_E = ur[i+1, j] 
                     val_W = ur[i-1, j]
 
@@ -906,7 +906,7 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
                     else:
                         val_N = ur[i, j+1]; c_north = inv_dz2
 
-                    if j == 0: # Bottom Wall (Should be skipped by loop, but safe fallback)
+                    if j == 0: # Bottom Wall
                         val_S = 0.0; c_south = inv_dz2
                     else:
                         val_S = ur[i, j-1]; c_south = inv_dz2
@@ -918,7 +918,8 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
                     
                     A_P = A_time + mu_val * (c_east + c_west + c_north + c_south + c_self_geo)
                     
-                    RHS = (A_time * ur[i, j]) + mu_val * (
+                    # Use ur_old[i,j] for the inertia source
+                    RHS = (A_time * ur_old[i, j]) + mu_val * (
                         c_east * val_E + c_west * val_W + 
                         c_north * val_N + c_south * val_S
                     )
@@ -929,19 +930,21 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid,
                     if diff > max_diff: max_diff = diff
                     ur[i, j] = u_new
                     
-        if max_diff < 1e-5: break # Tighter tolerance for high iterations
+        if max_diff < 1e-5: break
+
 
 @njit(cache=True)
 def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
                                    dt, dr, dz, max_iter=20, omega=1.4):
     """
     Implicit Viscosity for AXIAL velocity v_z.
-    Standard Laplacian (no hoop stress).
-    BCs: r=0 -> Symmetry (dUz/dr=0), Walls -> uz=0 (No Slip)
     """
     Nr, Nz = uz.shape
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
+
+    # 1. Create a copy for the Source Term (Inertia)
+    uz_old = uz.copy()
 
     for k in range(max_iter):
         
@@ -961,14 +964,8 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
                 if mask[i, j] == 1:
                     
                     # --- Neighbors ---
-                    # Radial
-                    val_E = uz[i+1, j]
-                    val_W = uz[i-1, j] 
-
-                    # Axial
-                    # j+1 and j-1 are safe because we iterate 1..Nz-2
-                    val_N = uz[i, j+1]
-                    val_S = uz[i, j-1]
+                    val_E = uz[i+1, j]; val_W = uz[i-1, j] 
+                    val_N = uz[i, j+1]; val_S = uz[i, j-1]
                     
                     c_north = inv_dz2
                     c_south = inv_dz2
@@ -980,7 +977,8 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
                     
                     A_P = A_time + mu_val * (c_east + c_west + c_north + c_south)
                     
-                    RHS = (A_time * uz[i, j]) + mu_val * (
+                    # Use uz_old[i,j] for the inertia source
+                    RHS = (A_time * uz_old[i, j]) + mu_val * (
                         c_east * val_E + c_west * val_W + 
                         c_north * val_N + c_south * val_S
                     )
@@ -992,6 +990,7 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid,
                     uz[i, j] = u_new
                     
         if max_diff < 1e-5: break
+
         
 @njit(parallel=True)
 def mom_rhs_inviscid(r, rho, ur, ut, uz, p,
@@ -1031,15 +1030,16 @@ def mom_rhs_inviscid(r, rho, ur, ut, uz, p,
             rhs_z[i, k] = -dp_dz
 
 
+"""
 @njit(parallel=True, fastmath=True, cache=True)
 def step_advection_hydro(r, dr, dz, dt,
                          rho, ur, ut, uz, p,
                          c_iso, rho_floor=1e-12,
                          fluid=None, face_r=None, face_z=None):
-    """
-    Explicit RK substep for Mass + Momentum Advection + Pressure.
-    Does NOT apply viscosity.
-    """
+    
+    #Explicit RK substep for Mass + Momentum Advection + Pressure.
+    #Does NOT apply viscosity.
+    
     Nr, Nz = rho.shape
     
     # 1. Compute Inviscid RHS (Pressure + Curvature)
@@ -1077,6 +1077,76 @@ def step_advection_hydro(r, dr, dz, dt,
     # 4. Update Density (Continuity)
     divF = np.zeros_like(rho)
     rusanov_div_scalar_masked(rho, ur, uz, r, dr, dz, a_r, a_z, divF, face_r, face_z, fluid)
+
+    for i in prange(0, Nr):
+        for k in range(0, Nz):
+            if (fluid is None) or (fluid[i,k] == 1):
+                rho[i,k] -= dt * divF[i,k]
+                if rho[i,k] < rho_floor: rho[i,k] = rho_floor
+"""
+
+
+# To test, smaller transport dissipation for swirl (ut)
+@njit(parallel=True, fastmath=True, cache=True)
+def step_advection_hydro(r, dr, dz, dt,
+                         rho, ur, ut, uz, p,
+                         c_iso, rho_floor=1e-12,
+                         fluid=None, face_r=None, face_z=None):
+    """
+    Explicit RK substep for Mass + Momentum Advection + Pressure.
+    Does NOT apply viscosity.
+    Updated: Uses low-dissipation flux for Swirl (ut).
+    """
+    Nr, Nz = rho.shape
+    
+    # 1. Compute Inviscid RHS (Pressure + Curvature)
+    rhs_r = np.zeros_like(rho)
+    rhs_t = np.zeros_like(rho)
+    rhs_z = np.zeros_like(rho)
+    
+    mom_rhs_inviscid(r, rho, ur, ut, uz, p, dr, dz, 
+                     rhs_r, rhs_t, rhs_z, 
+                     fluid, face_r, face_z)
+
+    # 2. Define Wave Speeds
+    # A. Acoustic Speed: For Density, Radial & Axial Momentum.
+    #    MUST include sound speed (c_iso) to stabilize pressure waves.
+    a_r_acoust = np.abs(ur) + c_iso
+    a_z_acoust = np.abs(uz) + c_iso
+
+    # B. Transport Speed: For Swirl (u_theta).
+    #    Pure advection. No sound speed.
+    #    We add a tiny epsilon (1.0 m/s) to prevent zero-dissipation instability at stagnation points.
+    a_r_transport = np.abs(ur) + 1.0
+    a_z_transport = np.abs(uz) + 1.0
+
+    div_m_r = np.zeros_like(rho); div_m_t = np.zeros_like(rho); div_m_z = np.zeros_like(rho)
+
+    # 3. Add Momentum Convection (Div(rho u u)) via Rusanov
+    
+    # Use Acoustic Speed for coupled variables (ur, uz)
+    rusanov_div_scalar_masked(rho*ur, ur, uz, r, dr, dz, a_r_acoust, a_z_acoust, div_m_r, face_r, face_z, fluid)
+    rusanov_div_scalar_masked(rho*uz, ur, uz, r, dr, dz, a_r_acoust, a_z_acoust, div_m_z, face_r, face_z, fluid)
+    
+    # Use Transport Speed for Swirl (ut)
+    rusanov_div_scalar_masked(rho*ut, ur, uz, r, dr, dz, a_r_transport, a_z_transport, div_m_t, face_r, face_z, fluid)
+
+    rhs_r[1:-1,1:-1] -= div_m_r[1:-1,1:-1]
+    rhs_t[1:-1,1:-1] -= div_m_t[1:-1,1:-1]
+    rhs_z[1:-1,1:-1] -= div_m_z[1:-1,1:-1]
+
+    # 4. Update Momenta (Explicit)
+    rho_safe = np.maximum(rho, rho_floor)
+    for i in prange(1, Nr-1):
+        for k in range(1, Nz-1):
+            if (fluid is None) or (fluid[i,k] == 1):
+                ur[i,k] += dt * rhs_r[i,k] / rho_safe[i,k]
+                ut[i,k] += dt * rhs_t[i,k] / rho_safe[i,k]
+                uz[i,k] += dt * rhs_z[i,k] / rho_safe[i,k]
+
+    # 5. Update Density (Continuity) - Uses Acoustic Speed
+    divF = np.zeros_like(rho)
+    rusanov_div_scalar_masked(rho, ur, uz, r, dr, dz, a_r_acoust, a_z_acoust, divF, face_r, face_z, fluid)
 
     for i in prange(0, Nr):
         for k in range(0, Nz):
@@ -1279,7 +1349,7 @@ def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn,
                     T_target = (K_en * Te[i, j] + K_in * Ti[i, j]) / K_total
                     
                     # 2. Calculate Relaxation Frequency [1/s]
-                    # FIX: Divide by Volumetric Heat Capacity (rho * Cv)
+                    # Divide by Volumetric Heat Capacity (rho * Cv)
                     rho_n = n_n * mn
                     vol_Cv = rho_n * Cv
                     
@@ -1325,86 +1395,58 @@ def add_ion_neutral_frictional_heating(Tn, un_t, vi_t,
 @njit(cache=True)
 def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid,
                                  dt, dr, dz, max_iter=20, omega=1.4):
-    """
-    Solves for v_theta diffusion using Implicit SOR with variable viscosity.
-    Uses pre-calculated mu_grid field.
-    """
     Nr, Nz = un_theta.shape
-    
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
+
+    # Make a copy of the "Old" velocity for the Inertia Source Term
+    # This ensures u_old stays fixed while un_theta (u_new) converges.
+    u_old = un_theta.copy() 
 
     for k in range(max_iter):
         max_diff = 0.0
         
-        # Start at i=1 (Axis r=0 is fixed 0 velocity)
-        for i in range(1, Nr):
+        for i in range(1, Nr-1):
+            # ... [Geometric coefficients setup is fine] ...
             r = i * dr
-            r_plus = r + 0.5 * dr
-            r_minus = r - 0.5 * dr
-            
-            # Geometric coefficients
-            c_east = (r_plus / r) * inv_dr2
-            c_west = (r_minus / r) * inv_dr2
+            c_east = ((r + 0.5*dr) / r) * inv_dr2
+            c_west = ((r - 0.5*dr) / r) * inv_dr2
             c_self_geo = 1.0 / (r * r)
 
-            for j in range(Nz):
+            for j in range(1, Nz-1):
                 if mask[i, j] == 1:
+                    # ... [Neighbor identification is fine] ...
+                    val_E = un_theta[i+1, j]; val_W = un_theta[i-1, j]
                     
-                    # --- 1. Identify Neighbors ---
-                    # Radial
-                    if i == Nr - 1:
-                        val_E = 0.0  # No-Slip (Stationary Wall)
-                    else:
-                        val_E = un_theta[i+1, j]
-                    
-                    val_W = un_theta[i-1, j]
+                    if j == Nz - 1: val_N = un_theta[i, j]; c_north = 0.0
+                    else:           val_N = un_theta[i, j+1]; c_north = inv_dz2
 
-                    # Axial
-                    if j == Nz - 1: # Symmetry
-                        val_N = un_theta[i, j]
-                        c_north = 0.0
-                    else:
-                        val_N = un_theta[i, j+1]
-                        c_north = inv_dz2
+                    if j == 0: val_S = 0.0; c_south = inv_dz2
+                    else:      val_S = un_theta[i, j-1]; c_south = inv_dz2
 
-                    if j == 0: # Wall
-                        val_S = 0.0 
-                        c_south = inv_dz2
-                    else:
-                        val_S = un_theta[i, j-1]
-                        c_south = inv_dz2
-                        
-                    # --- 2. Build Matrix Coefficients ---
-                    # Use local field values
+                    # --- Matrix & RHS ---
                     mu_val = mu_grid[i, j]
                     rho = max(nn[i, j], 1e12) * mn
-                    
                     A_time = rho / dt
                     
-                    # Central Coefficient
                     A_P = A_time + mu_val * (c_east + c_west + c_north + c_south + c_self_geo)
                     
-                    # RHS
-                    RHS = (A_time * un_theta[i, j]) + mu_val * (
-                        c_east * val_E + 
-                        c_west * val_W + 
-                        c_north * val_N + 
-                        c_south * val_S
+                    RHS = (A_time * u_old[i, j]) + mu_val * (
+                        c_east * val_E + c_west * val_W + 
+                        c_north * val_N + c_south * val_S
                     )
                     
-                    # --- 3. SOR Update ---
+                    # SOR Update
                     v_star = RHS / A_P
-                    v_new = (1.0 - omega) * un_theta[i, j] + omega * v_star
+                    v_new = (1.0 - omega)*un_theta[i, j] + omega*v_star
                     
                     diff = abs(v_new - un_theta[i, j])
-                    if diff > max_diff:
-                        max_diff = diff
+                    if diff > max_diff: max_diff = diff
                     
+                    # Update the guess for the next iteration
                     un_theta[i, j] = v_new
                     
-        if max_diff < 1e-4:
-            break
+        if max_diff < 1e-5: break
 
 
 @njit(cache=True)
@@ -1418,6 +1460,10 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
 
+    # Create a copy for the Inertia Source Term
+    # We need the temperature at time 'n' to calculate dT/dt properly.
+    Tn_old = Tn.copy()
+
     for k in range(max_iter):
         
         # Enforce Axis Symmetry
@@ -1427,26 +1473,20 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
 
         max_diff = 0.0
 
-        # FIX: Iterate only up to Nr-1 (Excluding the outer wall)
+        # Iterate only up to Nr-1 (Excluding the outer wall)
         for i in range(1, Nr - 1):
             r = i * dr
             
             c_east = ((r + 0.5*dr) / r) * inv_dr2
             c_west = ((r - 0.5*dr) / r) * inv_dr2
             
-            # FIX: Iterate only up to Nz-1 (Excluding top/bottom walls)
-            # Assuming Top/Bottom are also Dirichlet or fixed by BCs
+            # Iterate only up to Nz-1 (Excluding top/bottom walls)
             for j in range(1, Nz - 1):
                 if mask[i, j] == 1:
                     
                     # --- Neighbors ---
-                    # Radial
-                    # i+1 is safe and valid because we stop at Nr-2
-                    # Tn[i+1] will hold the Fixed Wall Temp (300K)
                     val_E = Tn[i+1, j] 
                     val_W = Tn[i-1, j]
-
-                    # Axial
                     val_N = Tn[i, j+1]
                     val_S = Tn[i, j-1]
                     
@@ -1456,13 +1496,14 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                     # --- Matrix Setup ---
                     kappa_val = kappa_grid[i, j]
                     
-                    rho = nn[i, j] * mn
+                    rho = max(nn[i, j], 1e12) * mn
                     Cv_vol = rho * c_v
                     A_time = Cv_vol / dt
                     
                     A_P = A_time + kappa_val * (c_east + c_west + c_north + c_south)
                     
-                    RHS = (A_time * Tn[i, j]) + kappa_val * (
+                    # Use Tn_old[i, j] 
+                    RHS = (A_time * Tn_old[i, j]) + kappa_val * (
                         c_east * val_E + c_west * val_W + 
                         c_north * val_N + c_south * val_S
                     )
@@ -1477,3 +1518,29 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                     Tn[i, j] = T_new
                     
         if max_diff < 1e-4: break
+
+
+# Not being used right now
+@njit(parallel=True, cache=True)
+def update_neutral_vtheta_explicit_force(un_theta, Jir, Bz, nn, mn, dt, mask):
+    """
+    Directly applies Lorentz Force to neutrals.
+    Fixes the '1/7th Force' issue seen in the core of your plot.
+    """
+    Nr, Nz = un_theta.shape
+    
+    for i in prange(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                # 1. Total Drive Force
+                # Note: If you have electron current, add it here: J_tot = Jir + Jer
+                F_drive = -1.0 * Jir[i, j] * Bz[i, j]
+                
+                # 2. Mass Density
+                rho = max(nn[i, j] * mn, 1e-12)
+                
+                # 3. Acceleration (100% efficiency)
+                accel = F_drive / rho
+                
+                # 4. Explicit Update
+                un_theta[i, j] += dt * accel

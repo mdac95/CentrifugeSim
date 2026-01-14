@@ -271,9 +271,9 @@ class NeutralFluidContainer:
         #self.p_grid[:,-1] = self.p_grid[:,-2]
 
         # no slip solid surfaces inside domain
-        self.un_r_grid[self.i_bc_list, self.j_bc_list] = 0.0
-        self.un_theta_grid[self.i_bc_list, self.j_bc_list] = 0.0
-        self.un_z_grid[self.i_bc_list, self.j_bc_list] = 0.0
+        #self.un_r_grid[self.i_bc_list, self.j_bc_list] = 0.0
+        #self.un_theta_grid[self.i_bc_list, self.j_bc_list] = 0.0
+        #self.un_z_grid[self.i_bc_list, self.j_bc_list] = 0.0
 
 
     def apply_bc_T(self):
@@ -395,6 +395,19 @@ class NeutralFluidContainer:
             self.fluid, self.face_r, self.face_z
         )
 
+        # Thermal Conduction
+        neutral_fluid_helper.solve_implicit_heat_sor(
+            self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
+            dt, dr, dz, max_iter=200, omega=1.8
+        )
+
+        # Viscosity
+        mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
+             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
+        )
+        self.mu_grid[:,:] = mu_val
+        self.kappa_grid[:,:] = kappa_val
+        
         # Viscosity
         # Note: should I combine all these kernel calls into one to save some time?
         neutral_fluid_helper.solve_implicit_viscosity_sor(
@@ -410,12 +423,6 @@ class NeutralFluidContainer:
             dt, dr, dz, max_iter=200, omega=1.8
         )
 
-        # Thermal Conduction
-        neutral_fluid_helper.solve_implicit_heat_sor(
-            self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
-            dt, dr, dz, max_iter=200, omega=1.8
-        )
-        
         self.update_p()
         apply_bc_vel(); apply_bc_temp()
 
@@ -508,6 +515,22 @@ class NeutralFluidContainer:
 
         self.apply_bc_T()
         self.apply_bc_isothermal()
+
+    def update_vtheta_explicit_force(self, hybrid_pic, geom, dt):
+        """
+        Updates Neutral azimuthal velocity due to collisions with Ions using an explicit formula.
+        Used when fluid ions are on.
+        Do not use this when kinetic ions are on.
+        """
+        neutral_fluid_helper.update_neutral_vtheta_explicit_force(
+            self.un_theta_grid,
+            hybrid_pic.Jir_grid,
+            hybrid_pic.Bz_grid,
+            self.nn_grid,
+            self.mass,
+            dt,
+            geom.mask
+        )
 
     #######################################################################################################
     ####################################### TO CALCULATE PARAMS ###########################################
