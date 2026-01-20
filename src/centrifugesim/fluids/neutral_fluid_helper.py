@@ -70,7 +70,7 @@ def dpdz_masked(p, dz, i, k, face_z):
 """
 
 @njit
-def dpdr_masked(p, dr, i, k, face_r, mask_vel):
+def dpdr_masked_prev(p, dr, i, k, face_r, mask_vel):
     """
     Computes dp/dr. 
     1. Checks Internal Walls using mask_vel (for Anodes).
@@ -114,7 +114,7 @@ def dpdr_masked(p, dr, i, k, face_r, mask_vel):
         return 0.0
 
 @njit
-def dpdz_masked(p, dz, i, k, face_z, mask_vel):
+def dpdz_masked_prev(p, dz, i, k, face_z, mask_vel):
     """
     Computes dp/dz.
     1. Checks Internal Walls using mask_vel.
@@ -150,6 +150,132 @@ def dpdz_masked(p, dz, i, k, face_z, mask_vel):
         return (p[i,k+1] - p[i,k-1]) / (2*dz)
     elif up_open and not down_open:
         return (p[i,k+1] - p[i,k]) / dz # Forward Difference (Triggers at k=1)
+    elif down_open and not up_open:
+        return (p[i,k] - p[i,k-1]) / dz
+    else:
+        return 0.0
+
+@njit
+def dpdr_masked(p, dr, i, k, face_r, mask_vel):
+    Nr = p.shape[0]
+
+    # --- 1. Domain Boundary Protection (Right Wall Nr-1) ---
+    if i == Nr - 2:
+        if face_r[i, k] == 1: return (p[i, k] - p[i-1, k]) / dr
+        else: return 0.0
+    
+    # --- 2. Check for Internal Solids (Shielding) ---
+    if mask_vel is not None:
+        
+        # ==========================================================
+        # CASE 1: Solid is on the RIGHT (at i+1 or i+2)
+        # We shield fluid nodes to the LEFT of the wall.
+        # ==========================================================
+        
+        # A. Are we at Fluid Node 1? (Current i is i-1 relative to wall i+1)
+        # Check: Is the right neighbor (i+1) a Wall Node?
+        if (i + 1 < Nr) and (mask_vel[i+1, k] == 0):
+            # Use Backward BDF2: i, i-1, i-2
+            if i >= 2 and mask_vel[i-2, k] == 1:
+                 return (3*p[i, k] - 4*p[i-1, k] + p[i-2, k]) / (2*dr)
+
+        # B. Are we at Fluid Node 2? (Current i is i-2 relative to wall i+2)
+        # Check: Is the node at i+2 a Wall Node?
+        if (i + 2 < Nr) and (mask_vel[i+2, k] == 0):
+            # Use Backward BDF2: i, i-1, i-2
+            if i >= 2 and mask_vel[i-2, k] == 1:
+                return (3*p[i, k] - 4*p[i-1, k] + p[i-2, k]) / (2*dr)
+
+        # ==========================================================
+        # CASE 2: Solid is on the LEFT (at i-1 or i-2)
+        # We shield fluid nodes to the RIGHT of the wall.
+        # ==========================================================
+
+        # A. Are we at Fluid Node 1? (Current i is i+1 relative to wall i-1)
+        # Check: Is the left neighbor (i-1) a Wall Node?
+        if (i - 1 >= 0) and (mask_vel[i-1, k] == 0):
+             # Use Forward BDF2: i, i+1, i+2
+             if i <= Nr - 3 and mask_vel[i+2, k] == 1:
+                 return (-3*p[i, k] + 4*p[i+1, k] - p[i+2, k]) / (2*dr)
+
+        # B. Are we at Fluid Node 2? (Current i is i+2 relative to wall i-2)
+        # Check: Is the node at i-2 a Wall Node?
+        if (i - 2 >= 0) and (mask_vel[i-2, k] == 0):
+             # Use Forward BDF2: i, i+1, i+2
+             if i <= Nr - 3 and mask_vel[i+2, k] == 1:
+                 return (-3*p[i, k] + 4*p[i+1, k] - p[i+2, k]) / (2*dr)
+
+    # --- 3. Standard Central Difference (Default) ---
+    right_open = (face_r[i+1, k] == 1)
+    if mask_vel is not None and i < Nr-1 and mask_vel[i+1, k] == 0: right_open = False
+
+    left_open = (face_r[i, k] == 1)
+    if mask_vel is not None and i > 0 and mask_vel[i-1, k] == 0: left_open = False
+
+    if right_open and left_open:
+        return (p[i+1,k] - p[i-1,k]) / (2*dr)
+    elif right_open and not left_open:
+        return (p[i+1,k] - p[i,k]) / dr
+    elif left_open and not right_open:
+        return (p[i,k] - p[i-1,k]) / dr
+    else:
+        return 0.0
+
+@njit
+def dpdz_masked(p, dz, i, k, face_z, mask_vel):
+    Nz = p.shape[1]
+    
+    # --- 1. Domain Boundary Protection (Bottom Wall k=1) ---
+    if k == 1:
+        if face_z[i, k+1] == 1: return (p[i, k+1] - p[i, k]) / dz
+        else: return 0.0
+
+    # --- 2. Check for Internal Solids ---
+    if mask_vel is not None:
+        
+        # ==========================================================
+        # CASE 3: Solid is ABOVE (at k+1 or k+2)
+        # We shield fluid nodes BELOW the wall.
+        # ==========================================================
+        
+        # A. Are we at Fluid Node 1? (Current k is k-1 relative to wall k+1)
+        if (k + 1 < Nz) and (mask_vel[i, k+1] == 0):
+            # Backward BDF2: k, k-1, k-2
+            if k >= 2 and mask_vel[i, k-2] == 1:
+                return (3*p[i, k] - 4*p[i, k-1] + p[i, k-2]) / (2*dz)
+        
+        # B. Are we at Fluid Node 2? (Current k is k-2 relative to wall k+2)
+        if (k + 2 < Nz) and (mask_vel[i, k+2] == 0):
+            if k >= 2 and mask_vel[i, k-2] == 1:
+                return (3*p[i, k] - 4*p[i, k-1] + p[i, k-2]) / (2*dz)
+
+        # ==========================================================
+        # CASE 4: Solid is BELOW (at k-1 or k-2)
+        # We shield fluid nodes ABOVE the wall.
+        # ==========================================================
+
+        # A. Are we at Fluid Node 1? (Current k is k+1 relative to wall k-1)
+        if (k - 1 >= 0) and (mask_vel[i, k-1] == 0):
+            # Forward BDF2: k, k+1, k+2
+            if k <= Nz - 3 and mask_vel[i, k+2] == 1:
+                return (-3*p[i, k] + 4*p[i, k+1] - p[i, k+2]) / (2*dz)
+
+        # B. Are we at Fluid Node 2? (Current k is k+2 relative to wall k-2)
+        if (k - 2 >= 0) and (mask_vel[i, k-2] == 0):
+            if k <= Nz - 3 and mask_vel[i, k+2] == 1:
+                return (-3*p[i, k] + 4*p[i, k+1] - p[i, k+2]) / (2*dz)
+
+    # --- 3. Standard Central Difference ---
+    up_open = (face_z[i, k+1] == 1)
+    if mask_vel is not None and k < Nz-1 and mask_vel[i, k+1] == 0: up_open = False
+    
+    down_open = (face_z[i, k] == 1)
+    if mask_vel is not None and k > 0 and mask_vel[i, k-1] == 0: down_open = False
+    
+    if up_open and down_open:
+        return (p[i,k+1] - p[i,k-1]) / (2*dz)
+    elif up_open and not down_open:
+        return (p[i,k+1] - p[i,k]) / dz
     elif down_open and not up_open:
         return (p[i,k] - p[i,k-1]) / dz
     else:

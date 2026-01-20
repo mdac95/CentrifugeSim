@@ -224,7 +224,7 @@ def compute_E_and_J(phi, geom,
 
 
 @njit(parallel=True, fastmath=True, cache=True)
-def _assemble_coefficients_core(
+def _assemble_coefficients_core_prev(
     Nr, Nz,
     r_c, r_w, r_e, dr_w, dr_e, dr_i,
     dz_s, dz_n, dz_j,
@@ -257,6 +257,15 @@ def _assemble_coefficients_core(
                 b[i, j]  = phi_dirichlet_val  # sets phi=0 for solids (anodes/cathode)
                 continue
 
+            if (i == Nr - 1) and (rmax_dirichlet_u8[j] == 1):
+                aP[i, j] = 1.0
+                aE[i, j] = 0.0
+                aW[i, j] = 0.0
+                aN[i, j] = 0.0
+                aS[i, j] = 0.0
+                b[i, j]  = phi_dirichlet_val
+                continue
+
             # --- EAST face (radial +) ---
             if i < Nr - 1:
                 if mask_u8[i+1, j] == 1:
@@ -279,13 +288,9 @@ def _assemble_coefficients_core(
             else:
                 # r = rmax boundary
                 if rmax_dirichlet_u8[j] == 1:
-                    # Dirichlet on outer wall
-                    if Nr > 1:
-                        ke_edge = sigmaP_cell[i, j]  # use cell conductivity
-                        ae_face = (r_e[i] * ke_edge) / (dr_e[i] * dr_i[i])
-                        aP[i, j] += ae_face
-                        b[i, j]  += ae_face * phi_dirichlet_val
-                # else Neumann zero radial flux
+                    pass
+
+                # Neumann zero radial flux
                 aE[i, j] = 0.0
 
             # --- WEST face (radial -) ---
@@ -381,6 +386,171 @@ def _assemble_coefficients_core(
 
     return aP, aE, aW, aN, aS, b
 
+@njit(parallel=True, fastmath=True, cache=True)
+def _assemble_coefficients_core(
+    Nr, Nz,
+    r_c, r_w, r_e, dr_w, dr_e, dr_i,
+    dz_s, dz_n, dz_j,
+    sigP_e, sigPar_n,                 # face conductivities
+    sigmaP_cell, sigmaPar_cell,       # cell-centered conductivities
+    mask_u8, cathode_u8, anode_u8,    # uint8 masks (1=True, 0=False)
+    rmax_dirichlet_u8,                # uint8 of length Nz (1=Dirichlet at rmax for this j)
+    g_top_cathode,                    # length Nr: dphi/dz at top-of-cathode, Neumann array
+    phi_dirichlet_val,                # typically 0.0 (anode potential)
+    S,                                # source term on cell centers
+    cathode_dirichlet_val_arr,        # array of length Nr for Dirichlet on top of cathode
+    use_cathode_dirichlet             # Boolean flag
+    ):
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    aP = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz))
+
+    for j in prange(Nz):
+        for i in range(Nr):
+            # -----------------------------------------------------------------
+            # 1. Solid Mask Check
+            # -----------------------------------------------------------------
+            if mask_u8[i, j] == 0:
+                aP[i, j] = 1.0
+                aE[i, j] = 0.0; aW[i, j] = 0.0; aN[i, j] = 0.0; aS[i, j] = 0.0
+                b[i, j]  = phi_dirichlet_val
+                continue
+
+            # -----------------------------------------------------------------
+            # 2. Clamped Boundary Node Check (FIX #1)
+            # If this node is at r=rmax AND is an anode region, force it to 0V.
+            # -----------------------------------------------------------------
+            if (i == Nr - 1) and (rmax_dirichlet_u8[j] == 1):
+                aP[i, j] = 1.0
+                aE[i, j] = 0.0; aW[i, j] = 0.0; aN[i, j] = 0.0; aS[i, j] = 0.0
+                b[i, j]  = phi_dirichlet_val
+                continue
+
+            # -----------------------------------------------------------------
+            # 3. EAST Face (Radial +)
+            # -----------------------------------------------------------------
+            if i < Nr - 1:
+                # Is the *next* node the clamped boundary?
+                neighbor_is_clamped = ((i + 1) == Nr - 1) and (rmax_dirichlet_u8[j] == 1)
+
+                if mask_u8[i+1, j] == 1:
+                    # Plasma-Plasma Interface
+                    if neighbor_is_clamped:
+                        # (FIX #2) UPWIND CONDUCTIVITY
+                        # Ignore the low conductivity of the wall node. 
+                        # Use the current cell's conductivity to drive current into the 0V boundary.
+                        ke = sigmaP_cell[i, j] 
+                        ae = (r_e[i] * ke) / (dr_e[i] * dr_i[i])
+                        aP[i, j] += ae
+                        b[i, j]  += ae * phi_dirichlet_val # Neighbor phi is fixed
+                        aE[i, j]  = 0.0
+                    else:
+                        # Standard Harmonic Mean
+                        ke = sigP_e[i, j]
+                        ae = (r_e[i] * ke) / (dr_e[i] * dr_i[i])
+                        aE[i, j] = ae
+                else:
+                    # Plasma-Solid Interface (Internal Anode)
+                    if anode_u8[i+1, j] == 1:
+                        # Dirichlet Anode
+                        ke = sigmaP_cell[i, j]
+                        ae_face = (r_e[i] * ke) / (dr_e[i] * dr_i[i])
+                        aP[i, j] += ae_face
+                        b[i, j]  += ae_face * phi_dirichlet_val
+                        aE[i, j]  = 0.0
+                    else:
+                        # Neumann (Cathode/Insulator)
+                        aE[i, j] = 0.0
+            else:
+                # r = rmax boundary (Neumann case only, Dirichlet caught by Fix #1)
+                aE[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 4. WEST Face (Radial -)
+            # -----------------------------------------------------------------
+            if i > 0:
+                if mask_u8[i-1, j] == 1:
+                    kw = sigP_e[i-1, j]
+                    aw = (r_w[i] * kw) / (dr_w[i] * dr_i[i])
+                    aW[i, j] = aw
+                else:
+                    if anode_u8[i-1, j] == 1:
+                        kw = sigmaP_cell[i, j]
+                        aw_face = (r_w[i] * kw) / (dr_w[i] * dr_i[i])
+                        aP[i, j] += aw_face
+                        b[i, j]  += aw_face * phi_dirichlet_val
+                        aW[i, j]  = 0.0
+                    else:
+                        aW[i, j] = 0.0
+            else:
+                aW[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 5. NORTH Face (Axial +)
+            # -----------------------------------------------------------------
+            if j < Nz - 1:
+                if mask_u8[i, j+1] == 1:
+                    kn = sigPar_n[i, j]
+                    an = (r_c[i] * kn) / (dz_n[j] * dz_j[j])
+                    aN[i, j] = an
+                else:
+                    if anode_u8[i, j+1] == 1:
+                        kn = sigmaPar_cell[i, j]
+                        an_face = (r_c[i] * kn) / (dz_n[j] * dz_j[j])
+                        aP[i, j] += an_face
+                        b[i, j]  += an_face * phi_dirichlet_val
+                        aN[i, j]  = 0.0
+                    else:
+                        aN[i, j] = 0.0
+            else:
+                aN[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 6. SOUTH Face (Axial -)
+            # -----------------------------------------------------------------
+            if j > 0:
+                if mask_u8[i, j-1] == 1:
+                    ks = sigPar_n[i, j-1]
+                    as_ = (r_c[i] * ks) / (dz_s[j] * dz_j[j])
+                    aS[i, j] = as_
+                else:
+                    if anode_u8[i, j-1] == 1:
+                        ks = sigmaPar_cell[i, j]
+                        as_face = (r_c[i] * ks) / (dz_s[j] * dz_j[j])
+                        aP[i, j] += as_face
+                        b[i, j]  += as_face * phi_dirichlet_val
+                        aS[i, j]  = 0.0
+                    elif cathode_u8[i, j-1] == 1:
+                        if use_cathode_dirichlet:
+                            val = cathode_dirichlet_val_arr[i]
+                            if(not np.isnan(val)):
+                                ks = sigmaPar_cell[i, j]
+                                as_face = (r_c[i] * ks) / (dz_s[j] * dz_j[j])
+                                aP[i, j] += as_face
+                                b[i, j]  += as_face * val 
+                                aS[i, j]  = 0.0
+                            else:
+                                aS[i, j]  = 0.0
+                        else:
+                            ks = sigPar_n[i, j]
+                            qzS = ks * g_top_cathode[i]
+                            b[i, j] += r_c[i] * qzS / dz_j[j]
+                            aS[i, j]  = 0.0
+                    else:
+                        aS[i, j] = 0.0
+            else:
+                aS[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 7. Final Assembly
+            # -----------------------------------------------------------------
+            aP[i, j] += (aE[i, j] + aW[i, j] + aN[i, j] + aS[i, j])
+            b[i, j]  += r_c[i] * S[i, j]
+
+    return aP, aE, aW, aN, aS, b
 
 def build_geometry_faces(r, z):
     r = np.asarray(r)
