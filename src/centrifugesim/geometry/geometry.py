@@ -97,6 +97,7 @@ class Geometry:
 
         # Volume weights
         self.volume_field = self.compute_volume_field()
+        self.volume_field[-1, :] = 0.5 * self.r[-1] * 2 * np.pi * self.dr * self.dz # corrected last cell volume
 
         # Volume weights for particle deposition
         self.volume_field_dep = self.compute_volume_field_dep()
