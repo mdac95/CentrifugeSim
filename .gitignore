@@ -144,6 +144,7 @@ ENV/
 env.bak/
 venv.bak/
 centrifuge/
+marco-centrifuge/
 
 # Spyder project settings
 .spyderproject
