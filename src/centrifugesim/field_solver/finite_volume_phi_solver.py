@@ -1,6 +1,9 @@
 import numpy as np
 from numba import njit, prange
 
+from scipy import sparse
+from scipy.sparse.linalg import splu, lgmres, LinearOperator, bicgstab, spilu
+
 from centrifugesim import constants
 
 
@@ -888,6 +891,150 @@ def sor_solve(phi, aP, aE, aW, aN, aS, b, mask_u8, omega, max_iter, tol):
     return max_iter, max_res
 
 
+def solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b):
+    """
+    Vectorized construction of the sparse matrix for A * phi = b.
+    Much faster than looping in Python.
+    """
+    n_dofs = Nr * Nz
+    
+    # 1. Create a grid of indices: ID[i, j] = i * Nz + j
+    # 'C' order implies the last index (j) changes fastest. 
+    idx_grid = np.arange(n_dofs, dtype=np.int32).reshape((Nr, Nz))
+
+    # Lists to hold the COO matrix data
+    rows = []
+    cols = []
+    data = []
+
+    # --- DIAGONAL (P) ---
+    # Equation: +aP * phi_P ... = b
+    rows.append(idx_grid.flatten())
+    cols.append(idx_grid.flatten())
+    data.append(aP.flatten())
+
+    # --- EAST (-aE * phi_E) ---
+    # Valid where i < Nr-1
+    # Current node: i,   Neighbor: i+1
+    current_ids = idx_grid[:-1, :].flatten()
+    neighbor_ids = idx_grid[1:, :].flatten()
+    values = -aE[:-1, :].flatten() # Move to LHS => becomes negative
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- WEST (-aW * phi_W) ---
+    # Valid where i > 0
+    # Current node: i,   Neighbor: i-1
+    current_ids = idx_grid[1:, :].flatten()
+    neighbor_ids = idx_grid[:-1, :].flatten()
+    values = -aW[1:, :].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- NORTH (-aN * phi_N) ---
+    # Valid where j < Nz-1
+    # Current node: j,   Neighbor: j+1
+    current_ids = idx_grid[:, :-1].flatten()
+    neighbor_ids = idx_grid[:, 1:].flatten()
+    values = -aN[:, :-1].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- SOUTH (-aS * phi_S) ---
+    # Valid where j > 0
+    # Current node: j,   Neighbor: j-1
+    current_ids = idx_grid[:, 1:].flatten()
+    neighbor_ids = idx_grid[:, :-1].flatten()
+    values = -aS[:, 1:].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # 3. Concatenate and Build
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+    data = np.concatenate(data)
+    
+    # Construct CSR Matrix (efficient for arithmetic/solving)
+    A = sparse.coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsc()
+    
+    # 4. Solve
+    # splu is the fastest direct solver for general unsymmetric matrices
+    solve = splu(A)
+    phi_vec = solve.solve(b.flatten())
+    
+    return phi_vec.reshape((Nr, Nz))
+
+
+def solve_iterative_krylov(Nr, Nz, aP, aE, aW, aN, aS, b, phi0, tol=1e-8, max_iter=250):
+    """
+    Solves A * phi = b using BiCGSTAB with an optional ILU preconditioner.
+    Uses phi0 as the initial guess (warm start).
+    """
+    n_dofs = Nr * Nz
+    x0 = phi0.flatten()
+    
+    # 1. Build Matrix A (Same vectorized code as Direct)
+    idx_grid = np.arange(n_dofs, dtype=np.int32).reshape((Nr, Nz))
+    rows, cols, data = [], [], []
+
+    # --- Diagonal ---
+    rows.append(idx_grid.flatten())
+    cols.append(idx_grid.flatten())
+    data.append(aP.flatten())
+
+    # --- Neighbors (East, West, North, South) ---
+    # ... (Copy the 4 neighbor blocks from solve_direct_fast exactly) ...
+    # Block 1: East
+    rows.append(idx_grid[:-1, :].flatten())
+    cols.append(idx_grid[1:, :].flatten())
+    data.append(-aE[:-1, :].flatten())
+    # Block 2: West
+    rows.append(idx_grid[1:, :].flatten())
+    cols.append(idx_grid[:-1, :].flatten())
+    data.append(-aW[1:, :].flatten())
+    # Block 3: North
+    rows.append(idx_grid[:, :-1].flatten())
+    cols.append(idx_grid[:, 1:].flatten())
+    data.append(-aN[:, :-1].flatten())
+    # Block 4: South
+    rows.append(idx_grid[:, 1:].flatten())
+    cols.append(idx_grid[:, :-1].flatten())
+    data.append(-aS[:, 1:].flatten())
+
+    # Build CSR Matrix
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+    data = np.concatenate(data)
+    A = sparse.coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()
+    
+    # 2. Preconditioner (The Critical Part)
+    # Simple ILU (Incomplete LU) factorization. 
+    # This approximates A ~ L*U without filling in all the zeros.
+    # drop_tol controls how sparse the factors are.
+    try:
+        ilu = spilu(A, drop_tol=1e-4, fill_factor=2.0)
+        M = LinearOperator((n_dofs, n_dofs), matvec=ilu.solve)
+    except RuntimeError:
+        # Fallback if ILU fails (singular matrix)
+        M = None
+
+    # 3. Solve
+    phi_vec, info = bicgstab(A, b.flatten(), x0=x0, M=M, rtol=tol, maxiter=max_iter)
+    
+    if info > 0:
+        print(f"[BiCGSTAB] Warning: Did not converge in {max_iter} iterations.")
+    
+    return phi_vec.reshape((Nr, Nz))
+
+
 def solve_anisotropic_poisson_FV(geom,
                                  sigma_P, sigma_parallel,
                                  ne=None, pe=None, Bz=None, un_theta=None,
@@ -944,3 +1091,148 @@ def solve_anisotropic_poisson_FV(geom,
         print(f"[FV-SOR] iterations = {iters}, residual = {res:.3e}")
 
     return phi, {"iterations": iters, "residual": float(res)}
+
+
+def solve_anisotropic_poisson_FV_direct(geom,
+                                 sigma_P, sigma_parallel,
+                                 ne=None, pe=None, Bz=None, un_theta=None,
+                                 Ji_r=None, Ji_z=None,
+                                 ne_floor=1.0,
+                                 dphi_dz_cathode_top=None,  # array (Nr,) at z=zmax_cathode
+                                 cathode_voltage_profile=None, # array (Nr,) or None
+                                 phi_anode_value=0.0,
+                                 phi0=None, omega=1.8, tol=1e-10, max_iter=50_000,
+                                 verbose=True):
+    """
+    Direct Solver (SuperLU) wrapper for the Finite Volume scheme.
+    Replaces SOR iteration with a single sparse matrix solve.
+    """
+    Nr, Nz = geom.Nr, geom.Nz
+
+    # --- 1. Compute RHS Source ---
+    S = compute_source_S(geom.r, geom.z,
+                         sigma_P, sigma_parallel,
+                         ne, pe,
+                         ne_floor,
+                         Bz=Bz, un_theta=un_theta,
+                         Ji_r=Ji_r, Ji_z=Ji_z,
+                         mask=geom.mask)
+
+    # Zero out source at boundaries/axis to avoid noise
+    S[0,:] = 0
+    S[geom.i_bc_list, geom.j_bc_list] *= 0
+
+    # --- 2. Assemble Coefficients (Numba) ---
+    aP, aE, aW, aN, aS, b = assemble_coefficients(
+        geom.r, geom.z,
+        sigmaP=sigma_P, sigmaPar=sigma_parallel,
+        geom=geom,
+        dphi_dz_cathode_top=dphi_dz_cathode_top,
+        cathode_voltage_profile=cathode_voltage_profile,
+        phi_anode_value=phi_anode_value,
+        S=S
+    )
+
+    # --- 3. Direct Sparse Solve ---
+    # Note: solve_direct_fast builds the matrix A and solves Ax=b
+    phi = solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b)
+
+    # --- 4. Compute Residual (Verification) ---
+    # Since this is not iterative, we manually calculate ||Ax-b|| to confirm precision.
+    # We use numpy array slicing to mimic the neighbor interactions.
+    
+    # Create shifted views for neighbors (padding with 0 where no neighbor exists)
+    phi_E = np.zeros_like(phi); phi_E[:-1, :] = phi[1:, :]   # i+1
+    phi_W = np.zeros_like(phi); phi_W[1:, :]  = phi[:-1, :]  # i-1
+    phi_N = np.zeros_like(phi); phi_N[:, :-1] = phi[:, 1:]   # j+1
+    phi_S = np.zeros_like(phi); phi_S[:, 1:]  = phi[:, :-1]  # j-1
+
+    # LHS = aP*phi - (Neighbors)
+    LHS = (aP * phi) - (aE * phi_E + aW * phi_W + aN * phi_N + aS * phi_S)
+    
+    # Residual = b - LHS
+    res_grid = np.abs(b - LHS)
+    
+    # Mask out solid nodes (where residual is trivially 0)
+    res_grid[geom.mask == 0] = 0.0
+    
+    max_res = np.max(res_grid)
+
+    if verbose:
+        print(f"[FV-DIRECT] iterations = 1, residual = {max_res:.3e}")
+
+    return phi, {"iterations": 1, "residual": float(max_res)}
+
+
+
+def solve_anisotropic_poisson_FV_krylov(geom,
+                                 sigma_P, sigma_parallel,
+                                 ne=None, pe=None, Bz=None, un_theta=None,
+                                 Ji_r=None, Ji_z=None,
+                                 ne_floor=1.0,
+                                 dphi_dz_cathode_top=None,  # array (Nr,) at z=zmax_cathode
+                                 cathode_voltage_profile=None, # array (Nr,) or None
+                                 phi_anode_value=0.0,
+                                 phi0=None, omega=1.8, tol=1e-10, max_iter=50_000,
+                                 verbose=True):
+    """
+    Krylov Iterative Solver (LGMRES) wrapper for the Finite Volume scheme.
+    """
+    Nr, Nz = geom.Nr, geom.Nz
+
+    # --- 1. Compute RHS Source ---
+    S = compute_source_S(geom.r, geom.z,
+                         sigma_P, sigma_parallel,
+                         ne, pe,
+                         ne_floor,
+                         Bz=Bz, un_theta=un_theta,
+                         Ji_r=Ji_r, Ji_z=Ji_z,
+                         mask=geom.mask)
+
+    # Zero out source at boundaries/axis to avoid noise
+    S[0,:] = 0
+    S[geom.i_bc_list, geom.j_bc_list] *= 0
+
+    # --- 2. Assemble Coefficients (Numba) ---
+    aP, aE, aW, aN, aS, b = assemble_coefficients(
+        geom.r, geom.z,
+        sigmaP=sigma_P, sigmaPar=sigma_parallel,
+        geom=geom,
+        dphi_dz_cathode_top=dphi_dz_cathode_top,
+        cathode_voltage_profile=cathode_voltage_profile,
+        phi_anode_value=phi_anode_value,
+        S=S
+    )
+
+    # --- 3. Direct Sparse Solve ---
+    # Note: solve_direct_fast builds the matrix A and solves Ax=b
+    phi = solve_iterative_krylov(Nr, Nz, aP, aE, aW, aN, aS, b, phi0=phi0, tol=tol)
+
+    # --- 4. Compute Residual (Verification) ---
+    # Since this is not iterative, we manually calculate ||Ax-b|| to confirm precision.
+    # We use numpy array slicing to mimic the neighbor interactions.
+    
+    # Create shifted views for neighbors (padding with 0 where no neighbor exists)
+    phi_E = np.zeros_like(phi); phi_E[:-1, :] = phi[1:, :]   # i+1
+    phi_W = np.zeros_like(phi); phi_W[1:, :]  = phi[:-1, :]  # i-1
+    phi_N = np.zeros_like(phi); phi_N[:, :-1] = phi[:, 1:]   # j+1
+    phi_S = np.zeros_like(phi); phi_S[:, 1:]  = phi[:, :-1]  # j-1
+
+    # LHS = aP*phi - (Neighbors)
+    LHS = (aP * phi) - (aE * phi_E + aW * phi_W + aN * phi_N + aS * phi_S)
+    
+    # Residual = b - LHS
+    res_grid = np.abs(b - LHS)
+    
+    # Mask out solid nodes (where residual is trivially 0)
+    res_grid[geom.mask == 0] = 0.0
+    
+    max_res = np.max(res_grid)
+
+    if verbose:
+        print(f"[FV-KRYLOV] residual = {max_res:.3e}")
+
+    return phi, {"residual": float(max_res)}
+
+
+
