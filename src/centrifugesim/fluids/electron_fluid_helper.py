@@ -2,6 +2,9 @@ import numpy as np
 import numba
 from numba import njit
 
+from scipy import sparse
+from scipy.sparse.linalg import splu, lgmres, LinearOperator, bicgstab, spilu
+
 from centrifugesim import constants
 
 # Small floors to avoid division-by-zero in edge cells
@@ -894,3 +897,385 @@ def solve_Te_diffusion_implicit_SOR(Te, ne, kappa_par, kappa_perp,
                     
         if max_diff < tol:
             break
+
+@numba.jit(nopython=True, parallel=True, cache=True)
+def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp, 
+                             br, bz, mask, dr, dz, r_coords, dt, 
+                             mi):
+    """
+    Finite Difference Assembly (Matches old SOR logic exactly).
+    Replicates the 1/r singularity at the axis to reproduce 'stiff' axis behavior.
+    """
+    Nr, Nz = Te.shape
+    kb = constants.kb
+    
+    # Initialize Matrices
+    aP = np.zeros((Nr, Nz)) # Diagonal
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz)) # RHS
+    
+    inv_dr2 = 1.0 / (dr * dr)
+    inv_dz2 = 1.0 / (dz * dz)
+    delta_sheath = 1.0 
+
+    for i in numba.prange(Nr):
+        r_loc = r_coords[i]
+        # REPLICATE SOR SINGULARITY
+        inv_r = 1.0 / (r_loc + 1e-12) 
+        
+        for j in range(Nz):
+            if mask[i, j] == 0:
+                aP[i, j] = 1.0
+                b[i, j]  = Te[i, j]
+                continue
+            
+            # --- 1. Identify Neighbors (Same as SOR) ---
+            has_N = (j < Nz-1) and (mask[i, j+1] == 1)
+            has_S = (j > 0)    and (mask[i, j-1] == 1)
+            has_E = (i < Nr-1) and (mask[i+1, j] == 1)
+            has_W = (i > 0)    and (mask[i-1, j] == 1)
+            
+            # --- 2. Calculate Tensors (Same as SOR) ---
+            k_p = kappa_par[i, j]
+            k_v = kappa_perp[i, j]
+            Br = br[i, j]
+            Bz = bz[i, j]
+            
+            k_rr = k_v + (k_p - k_v) * Br*Br
+            k_zz = k_v + (k_p - k_v) * Bz*Bz
+            
+            # --- 3. Base Coefficients ---
+            # Note: We compute these "potential" coefficients, 
+            # then set them to 0 later if neighbor doesn't exist, just like SOR.
+            
+            # Radial terms with cylindrical correction
+            geom_fac = 0.5 * dr * inv_r
+            val_E = k_rr * inv_dr2 * (1.0 + geom_fac)
+            val_W = k_rr * inv_dr2 * (1.0 - geom_fac)
+            
+            # Axial terms
+            val_N = k_zz * inv_dz2
+            val_S = k_zz * inv_dz2
+            
+            # Inertia Term (1.5 * n * k / dt)
+            Cv_term = 1.5 * ne[i, j] * kb / dt
+            
+            # --- 4. Boundary Conditions (Same as SOR) ---
+            
+            # NORTH
+            if not has_N:
+                val_N = 0.0
+            
+            # SOUTH
+            if not has_S:
+                val_S = 0.0
+                if j == 0: # Physical Wall
+                    cs = np.sqrt(kb * Te[i, j] / mi)
+                    G_sheath = delta_sheath * ne[i, j] * cs * kb
+                    Cv_term += G_sheath / dz
+
+            # EAST
+            if not has_E:
+                val_E = 0.0
+                if i == Nr - 1: # Physical Wall
+                    cs = np.sqrt(kb * Te[i, j] / mi)
+                    G_sheath = delta_sheath * ne[i, j] * cs * kb
+                    Cv_term += G_sheath / dr
+            
+            # WEST
+            if not has_W:
+                val_W = 0.0 # Axis or Mask
+            
+            # --- 5. Matrix Assembly ---
+            # SOR equation: 
+            # (Cv + sum_Coeffs) * T_new = RHS_old + sum(Coeff * T_neighbor)
+            # Rearranged for A*x=b:
+            # (Cv + sum_coeffs) * T_center - Coeff_E*T_E ... = RHS_old
+            
+            aE[i, j] = val_E
+            aW[i, j] = val_W
+            aN[i, j] = val_N
+            aS[i, j] = val_S
+            
+            # Diagonal is Sum of neighbor coeffs + Inertia
+            aP[i, j] = Cv_term + val_E + val_W + val_N + val_S
+            
+            # RHS is Inertia * T_old
+            b[i, j] = (1.5 * ne[i, j] * kb / dt) * Te[i, j]
+
+    return aP, aE, aW, aN, aS, b
+
+
+@numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def assemble_Te_diffusion_coeffs(Te_n, ne, kappa_par, kappa_perp, 
+                                 br, bz, mask, dr, dz, r_coords, dt, 
+                                 mi):
+    """
+    STRICT FINITE VOLUME FORMULATION (Flux Balance).
+    
+    Fixes:
+    - Cold Corner Trap: Uses ARITHMETIC MEAN for face conductivity. 
+      (Allows heat to enter cold cells).
+    - Axis/Boundaries: Handled by Area weighting.
+    - No Q_ohm: Operator splitting assumed (source added externally).
+    """
+    Nr, Nz = Te_n.shape
+    kb = constants.kb
+    
+    aP = np.zeros((Nr, Nz))
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz))
+    
+    delta_sheath = 1.0 
+    
+    for i in numba.prange(Nr):
+        r_i = r_coords[i]
+        
+        # --- 1. Cell Geometry ---
+        if i == 0:
+            # Axis Cell
+            r_edge = 0.5 * dr
+            Vol = np.pi * r_edge**2 * dz
+            Area_E = 2.0 * np.pi * r_edge * dz
+            Area_W = 0.0  
+            Area_N = np.pi * r_edge**2
+            Area_S = np.pi * r_edge**2
+            dist_E = dr
+            dist_W = 1.0 # Dummy
+        else:
+            # Bulk Cell
+            Vol = 2.0 * np.pi * r_i * dr * dz
+            r_east = r_i + 0.5*dr
+            r_west = r_i - 0.5*dr
+            Area_E = 2.0 * np.pi * r_east * dz
+            Area_W = 2.0 * np.pi * r_west * dz
+            Area_N = 2.0 * np.pi * r_i * dr
+            Area_S = 2.0 * np.pi * r_i * dr
+            dist_E = dr
+            dist_W = dr
+            
+        dist_N = dz
+        dist_S = dz
+        
+        for j in range(Nz):
+            if mask[i, j] == 0:
+                aP[i, j] = 1.0
+                b[i, j]  = Te_n[i, j]
+                continue
+            
+            # --- 2. Local Tensor Elements ---
+            # We calculate k_rr and k_zz for the current cell (P)
+            k_p_loc = kappa_par[i, j]
+            k_v_loc = kappa_perp[i, j]
+            Br = br[i, j]
+            Bz = bz[i, j]
+            
+            k_rr_loc = k_v_loc + (k_p_loc - k_v_loc) * Br*Br
+            k_zz_loc = k_v_loc + (k_p_loc - k_v_loc) * Bz*Bz
+            
+            # --- 3. Neighbor Connections & Face Conductivities ---
+            has_N = (j < Nz-1) and (mask[i, j+1] == 1)
+            has_S = (j > 0)    and (mask[i, j-1] == 1)
+            has_E = (i < Nr-1) and (mask[i+1, j] == 1)
+            has_W = (i > 0)    and (mask[i-1, j] == 1)
+            
+            # EAST Face (i -> i+1)
+            if has_E:
+                # Neighbor properties
+                k_p_E = kappa_par[i+1, j]
+                k_v_E = kappa_perp[i+1, j]
+                Br_E  = br[i+1, j]
+                k_rr_E = k_v_E + (k_p_E - k_v_E) * Br_E*Br_E
+                
+                # ARITHMETIC MEAN: (k_loc + k_neigh) / 2
+                # This ensures that if the neighbor is hot, conductivity is high.
+                k_face = 0.5 * (k_rr_loc + k_rr_E)
+                aE[i, j] = k_face * Area_E / dist_E
+            else:
+                aE[i, j] = 0.0
+            
+            # WEST Face (i -> i-1)
+            if has_W:
+                k_p_W = kappa_par[i-1, j]
+                k_v_W = kappa_perp[i-1, j]
+                Br_W  = br[i-1, j]
+                k_rr_W = k_v_W + (k_p_W - k_v_W) * Br_W*Br_W
+                
+                k_face = 0.5 * (k_rr_loc + k_rr_W)
+                aW[i, j] = k_face * Area_W / dist_W
+            else:
+                aW[i, j] = 0.0
+                
+            # NORTH Face (j -> j+1)
+            if has_N:
+                k_p_N = kappa_par[i, j+1]
+                k_v_N = kappa_perp[i, j+1]
+                Bz_N  = bz[i, j+1]
+                k_zz_N = k_v_N + (k_p_N - k_v_N) * Bz_N*Bz_N
+                
+                k_face = 0.5 * (k_zz_loc + k_zz_N)
+                aN[i, j] = k_face * Area_N / dist_N
+            else:
+                aN[i, j] = 0.0
+            
+            # SOUTH Face (j -> j-1)
+            if has_S:
+                k_p_S = kappa_par[i, j-1]
+                k_v_S = kappa_perp[i, j-1]
+                Bz_S  = bz[i, j-1]
+                k_zz_S = k_v_S + (k_p_S - k_v_S) * Bz_S*Bz_S
+                
+                k_face = 0.5 * (k_zz_loc + k_zz_S)
+                aS[i, j] = k_face * Area_S / dist_S
+            else:
+                aS[i, j] = 0.0
+
+            # --- 4. Sheath Loss (Physical Boundaries Only) ---
+            # Zmin (Bottom) and Rmax (Outer)
+            sheath_cond = 0.0
+            is_zmin = (j == 0)
+            is_rmax = (i == Nr - 1)
+            
+            if is_zmin or is_rmax:
+                cs = np.sqrt(kb * Te_n[i, j] / mi)
+                G_sheath_flux = delta_sheath * ne[i, j] * cs * kb 
+                if is_zmin: sheath_cond += G_sheath_flux * Area_S
+                if is_rmax: sheath_cond += G_sheath_flux * Area_E
+
+            # --- 5. Assembly ---
+            # Inertia: 1.5 * n * k * Vol / dt
+            inertia = 1.5 * ne[i, j] * kb * Vol / dt
+            
+            sum_G = aE[i, j] + aW[i, j] + aN[i, j] + aS[i, j]
+            
+            aP[i, j] = inertia + sum_G + sheath_cond
+            
+            # RHS: Only previous energy (no q_ohm here)
+            b[i, j]  = inertia * Te_n[i, j]
+
+    return aP, aE, aW, aN, aS, b
+
+
+
+def solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b):
+    """
+    Vectorized construction of the sparse matrix for A * phi = b.
+    Much faster than looping in Python.
+    """
+    n_dofs = Nr * Nz
+    
+    # 1. Create a grid of indices: ID[i, j] = i * Nz + j
+    # 'C' order implies the last index (j) changes fastest. 
+    idx_grid = np.arange(n_dofs, dtype=np.int32).reshape((Nr, Nz))
+
+    # Lists to hold the COO matrix data
+    rows = []
+    cols = []
+    data = []
+
+    # --- DIAGONAL (P) ---
+    # Equation: +aP * phi_P ... = b
+    rows.append(idx_grid.flatten())
+    cols.append(idx_grid.flatten())
+    data.append(aP.flatten())
+
+    # --- EAST (-aE * phi_E) ---
+    # Valid where i < Nr-1
+    # Current node: i,   Neighbor: i+1
+    current_ids = idx_grid[:-1, :].flatten()
+    neighbor_ids = idx_grid[1:, :].flatten()
+    values = -aE[:-1, :].flatten() # Move to LHS => becomes negative
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- WEST (-aW * phi_W) ---
+    # Valid where i > 0
+    # Current node: i,   Neighbor: i-1
+    current_ids = idx_grid[1:, :].flatten()
+    neighbor_ids = idx_grid[:-1, :].flatten()
+    values = -aW[1:, :].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- NORTH (-aN * phi_N) ---
+    # Valid where j < Nz-1
+    # Current node: j,   Neighbor: j+1
+    current_ids = idx_grid[:, :-1].flatten()
+    neighbor_ids = idx_grid[:, 1:].flatten()
+    values = -aN[:, :-1].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- SOUTH (-aS * phi_S) ---
+    # Valid where j > 0
+    # Current node: j,   Neighbor: j-1
+    current_ids = idx_grid[:, 1:].flatten()
+    neighbor_ids = idx_grid[:, :-1].flatten()
+    values = -aS[:, 1:].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # 3. Concatenate and Build
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+    data = np.concatenate(data)
+    
+    # Construct CSR Matrix (efficient for arithmetic/solving)
+    A = sparse.coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsc()
+    
+    # 4. Solve
+    # splu is the fastest direct solver for general unsymmetric matrices
+    solve = splu(A)
+    phi_vec = solve.solve(b.flatten())
+    
+    return phi_vec.reshape((Nr, Nz))
+
+
+def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp, 
+                              br, bz, mask, dr, dz, r_coords, dt, 
+                              mi, Te_floor, verbose=False):
+    """
+    Direct Solver for Anisotropic Electron Heat Diffusion.
+    Uses Splu (SuperLU) for robust, instant solution.
+    """
+    Nr, Nz = Te.shape
+    
+    # 1. Assemble Coefficients (Numba)
+    # We pass 'Te' as the "old" temperature for linearization of non-linear terms (sheath)
+    #aP, aE, aW, aN, aS, b = assemble_Te_diffusion_coeffs(
+    aP, aE, aW, aN, aS, b = assemble_Te_diffusion_FD(
+        Te, ne, kappa_par, kappa_perp, 
+        br, bz, mask, dr, dz, r_coords, dt, 
+        mi
+    )
+    
+    # 2. Direct Solve (Scipy/SuperLU)
+    # Uses the same helper you wrote for the Poisson solver
+    Te_new = solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b)
+    
+    # 3. Apply Physics Floor
+    Te_new = np.maximum(Te_new, Te_floor)
+    
+    # 4. Mask Cleanup (Force solids to 0 or keeping T_old)
+    # The assembly fixes them to T_old, but the solve might drift slightly due to precision.
+    # Strictly speaking, masked values don't matter for the plasma physics.
+    
+    if verbose:
+        diff = np.max(np.abs(Te_new - Te))
+        print(f"[Te-DIRECT] Solved. Max Delta T = {diff:.3f} K")
+        
+    return Te_new

@@ -1,6 +1,9 @@
 import numpy as np
 from numba import njit, prange
 
+from scipy import sparse
+from scipy.sparse.linalg import splu, lgmres, LinearOperator, bicgstab, spilu
+
 from centrifugesim import constants
 
 
@@ -224,7 +227,7 @@ def compute_E_and_J(phi, geom,
 
 
 @njit(parallel=True, fastmath=True, cache=True)
-def _assemble_coefficients_core(
+def _assemble_coefficients_core_prev(
     Nr, Nz,
     r_c, r_w, r_e, dr_w, dr_e, dr_i,
     dz_s, dz_n, dz_j,
@@ -257,6 +260,15 @@ def _assemble_coefficients_core(
                 b[i, j]  = phi_dirichlet_val  # sets phi=0 for solids (anodes/cathode)
                 continue
 
+            if (i == Nr - 1) and (rmax_dirichlet_u8[j] == 1):
+                aP[i, j] = 1.0
+                aE[i, j] = 0.0
+                aW[i, j] = 0.0
+                aN[i, j] = 0.0
+                aS[i, j] = 0.0
+                b[i, j]  = phi_dirichlet_val
+                continue
+
             # --- EAST face (radial +) ---
             if i < Nr - 1:
                 if mask_u8[i+1, j] == 1:
@@ -279,13 +291,9 @@ def _assemble_coefficients_core(
             else:
                 # r = rmax boundary
                 if rmax_dirichlet_u8[j] == 1:
-                    # Dirichlet on outer wall
-                    if Nr > 1:
-                        ke_edge = sigmaP_cell[i, j]  # use cell conductivity
-                        ae_face = (r_e[i] * ke_edge) / (dr_e[i] * dr_i[i])
-                        aP[i, j] += ae_face
-                        b[i, j]  += ae_face * phi_dirichlet_val
-                # else Neumann zero radial flux
+                    pass
+
+                # Neumann zero radial flux
                 aE[i, j] = 0.0
 
             # --- WEST face (radial -) ---
@@ -381,6 +389,171 @@ def _assemble_coefficients_core(
 
     return aP, aE, aW, aN, aS, b
 
+@njit(parallel=True, fastmath=True, cache=True)
+def _assemble_coefficients_core(
+    Nr, Nz,
+    r_c, r_w, r_e, dr_w, dr_e, dr_i,
+    dz_s, dz_n, dz_j,
+    sigP_e, sigPar_n,                 # face conductivities
+    sigmaP_cell, sigmaPar_cell,       # cell-centered conductivities
+    mask_u8, cathode_u8, anode_u8,    # uint8 masks (1=True, 0=False)
+    rmax_dirichlet_u8,                # uint8 of length Nz (1=Dirichlet at rmax for this j)
+    g_top_cathode,                    # length Nr: dphi/dz at top-of-cathode, Neumann array
+    phi_dirichlet_val,                # typically 0.0 (anode potential)
+    S,                                # source term on cell centers
+    cathode_dirichlet_val_arr,        # array of length Nr for Dirichlet on top of cathode
+    use_cathode_dirichlet             # Boolean flag
+    ):
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    aP = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz))
+
+    for j in prange(Nz):
+        for i in range(Nr):
+            # -----------------------------------------------------------------
+            # 1. Solid Mask Check
+            # -----------------------------------------------------------------
+            if mask_u8[i, j] == 0:
+                aP[i, j] = 1.0
+                aE[i, j] = 0.0; aW[i, j] = 0.0; aN[i, j] = 0.0; aS[i, j] = 0.0
+                b[i, j]  = phi_dirichlet_val
+                continue
+
+            # -----------------------------------------------------------------
+            # 2. Clamped Boundary Node Check (FIX #1)
+            # If this node is at r=rmax AND is an anode region, force it to 0V.
+            # -----------------------------------------------------------------
+            if (i == Nr - 1) and (rmax_dirichlet_u8[j] == 1):
+                aP[i, j] = 1.0
+                aE[i, j] = 0.0; aW[i, j] = 0.0; aN[i, j] = 0.0; aS[i, j] = 0.0
+                b[i, j]  = phi_dirichlet_val
+                continue
+
+            # -----------------------------------------------------------------
+            # 3. EAST Face (Radial +)
+            # -----------------------------------------------------------------
+            if i < Nr - 1:
+                # Is the *next* node the clamped boundary?
+                neighbor_is_clamped = ((i + 1) == Nr - 1) and (rmax_dirichlet_u8[j] == 1)
+
+                if mask_u8[i+1, j] == 1:
+                    # Plasma-Plasma Interface
+                    if neighbor_is_clamped:
+                        # (FIX #2) UPWIND CONDUCTIVITY
+                        # Ignore the low conductivity of the wall node. 
+                        # Use the current cell's conductivity to drive current into the 0V boundary.
+                        ke = sigmaP_cell[i, j] 
+                        ae = (r_e[i] * ke) / (dr_e[i] * dr_i[i])
+                        aP[i, j] += ae
+                        b[i, j]  += ae * phi_dirichlet_val # Neighbor phi is fixed
+                        aE[i, j]  = 0.0
+                    else:
+                        # Standard Harmonic Mean
+                        ke = sigP_e[i, j]
+                        ae = (r_e[i] * ke) / (dr_e[i] * dr_i[i])
+                        aE[i, j] = ae
+                else:
+                    # Plasma-Solid Interface (Internal Anode)
+                    if anode_u8[i+1, j] == 1:
+                        # Dirichlet Anode
+                        ke = sigmaP_cell[i, j]
+                        ae_face = (r_e[i] * ke) / (dr_e[i] * dr_i[i])
+                        aP[i, j] += ae_face
+                        b[i, j]  += ae_face * phi_dirichlet_val
+                        aE[i, j]  = 0.0
+                    else:
+                        # Neumann (Cathode/Insulator)
+                        aE[i, j] = 0.0
+            else:
+                # r = rmax boundary (Neumann case only, Dirichlet caught by Fix #1)
+                aE[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 4. WEST Face (Radial -)
+            # -----------------------------------------------------------------
+            if i > 0:
+                if mask_u8[i-1, j] == 1:
+                    kw = sigP_e[i-1, j]
+                    aw = (r_w[i] * kw) / (dr_w[i] * dr_i[i])
+                    aW[i, j] = aw
+                else:
+                    if anode_u8[i-1, j] == 1:
+                        kw = sigmaP_cell[i, j]
+                        aw_face = (r_w[i] * kw) / (dr_w[i] * dr_i[i])
+                        aP[i, j] += aw_face
+                        b[i, j]  += aw_face * phi_dirichlet_val
+                        aW[i, j]  = 0.0
+                    else:
+                        aW[i, j] = 0.0
+            else:
+                aW[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 5. NORTH Face (Axial +)
+            # -----------------------------------------------------------------
+            if j < Nz - 1:
+                if mask_u8[i, j+1] == 1:
+                    kn = sigPar_n[i, j]
+                    an = (r_c[i] * kn) / (dz_n[j] * dz_j[j])
+                    aN[i, j] = an
+                else:
+                    if anode_u8[i, j+1] == 1:
+                        kn = sigmaPar_cell[i, j]
+                        an_face = (r_c[i] * kn) / (dz_n[j] * dz_j[j])
+                        aP[i, j] += an_face
+                        b[i, j]  += an_face * phi_dirichlet_val
+                        aN[i, j]  = 0.0
+                    else:
+                        aN[i, j] = 0.0
+            else:
+                aN[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 6. SOUTH Face (Axial -)
+            # -----------------------------------------------------------------
+            if j > 0:
+                if mask_u8[i, j-1] == 1:
+                    ks = sigPar_n[i, j-1]
+                    as_ = (r_c[i] * ks) / (dz_s[j] * dz_j[j])
+                    aS[i, j] = as_
+                else:
+                    if anode_u8[i, j-1] == 1:
+                        ks = sigmaPar_cell[i, j]
+                        as_face = (r_c[i] * ks) / (dz_s[j] * dz_j[j])
+                        aP[i, j] += as_face
+                        b[i, j]  += as_face * phi_dirichlet_val
+                        aS[i, j]  = 0.0
+                    elif cathode_u8[i, j-1] == 1:
+                        if use_cathode_dirichlet:
+                            val = cathode_dirichlet_val_arr[i]
+                            if(not np.isnan(val)):
+                                ks = sigmaPar_cell[i, j]
+                                as_face = (r_c[i] * ks) / (dz_s[j] * dz_j[j])
+                                aP[i, j] += as_face
+                                b[i, j]  += as_face * val 
+                                aS[i, j]  = 0.0
+                            else:
+                                aS[i, j]  = 0.0
+                        else:
+                            ks = sigPar_n[i, j]
+                            qzS = ks * g_top_cathode[i]
+                            b[i, j] += r_c[i] * qzS / dz_j[j]
+                            aS[i, j]  = 0.0
+                    else:
+                        aS[i, j] = 0.0
+            else:
+                aS[i, j] = 0.0
+
+            # -----------------------------------------------------------------
+            # 7. Final Assembly
+            # -----------------------------------------------------------------
+            aP[i, j] += (aE[i, j] + aW[i, j] + aN[i, j] + aS[i, j])
+            b[i, j]  += r_c[i] * S[i, j]
+
+    return aP, aE, aW, aN, aS, b
 
 def build_geometry_faces(r, z):
     r = np.asarray(r)
@@ -718,6 +891,150 @@ def sor_solve(phi, aP, aE, aW, aN, aS, b, mask_u8, omega, max_iter, tol):
     return max_iter, max_res
 
 
+def solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b):
+    """
+    Vectorized construction of the sparse matrix for A * phi = b.
+    Much faster than looping in Python.
+    """
+    n_dofs = Nr * Nz
+    
+    # 1. Create a grid of indices: ID[i, j] = i * Nz + j
+    # 'C' order implies the last index (j) changes fastest. 
+    idx_grid = np.arange(n_dofs, dtype=np.int32).reshape((Nr, Nz))
+
+    # Lists to hold the COO matrix data
+    rows = []
+    cols = []
+    data = []
+
+    # --- DIAGONAL (P) ---
+    # Equation: +aP * phi_P ... = b
+    rows.append(idx_grid.flatten())
+    cols.append(idx_grid.flatten())
+    data.append(aP.flatten())
+
+    # --- EAST (-aE * phi_E) ---
+    # Valid where i < Nr-1
+    # Current node: i,   Neighbor: i+1
+    current_ids = idx_grid[:-1, :].flatten()
+    neighbor_ids = idx_grid[1:, :].flatten()
+    values = -aE[:-1, :].flatten() # Move to LHS => becomes negative
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- WEST (-aW * phi_W) ---
+    # Valid where i > 0
+    # Current node: i,   Neighbor: i-1
+    current_ids = idx_grid[1:, :].flatten()
+    neighbor_ids = idx_grid[:-1, :].flatten()
+    values = -aW[1:, :].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- NORTH (-aN * phi_N) ---
+    # Valid where j < Nz-1
+    # Current node: j,   Neighbor: j+1
+    current_ids = idx_grid[:, :-1].flatten()
+    neighbor_ids = idx_grid[:, 1:].flatten()
+    values = -aN[:, :-1].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # --- SOUTH (-aS * phi_S) ---
+    # Valid where j > 0
+    # Current node: j,   Neighbor: j-1
+    current_ids = idx_grid[:, 1:].flatten()
+    neighbor_ids = idx_grid[:, :-1].flatten()
+    values = -aS[:, 1:].flatten()
+    
+    rows.append(current_ids)
+    cols.append(neighbor_ids)
+    data.append(values)
+
+    # 3. Concatenate and Build
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+    data = np.concatenate(data)
+    
+    # Construct CSR Matrix (efficient for arithmetic/solving)
+    A = sparse.coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsc()
+    
+    # 4. Solve
+    # splu is the fastest direct solver for general unsymmetric matrices
+    solve = splu(A)
+    phi_vec = solve.solve(b.flatten())
+    
+    return phi_vec.reshape((Nr, Nz))
+
+
+def solve_iterative_krylov(Nr, Nz, aP, aE, aW, aN, aS, b, phi0, tol=1e-8, max_iter=250):
+    """
+    Solves A * phi = b using BiCGSTAB with an optional ILU preconditioner.
+    Uses phi0 as the initial guess (warm start).
+    """
+    n_dofs = Nr * Nz
+    x0 = phi0.flatten()
+    
+    # 1. Build Matrix A (Same vectorized code as Direct)
+    idx_grid = np.arange(n_dofs, dtype=np.int32).reshape((Nr, Nz))
+    rows, cols, data = [], [], []
+
+    # --- Diagonal ---
+    rows.append(idx_grid.flatten())
+    cols.append(idx_grid.flatten())
+    data.append(aP.flatten())
+
+    # --- Neighbors (East, West, North, South) ---
+    # ... (Copy the 4 neighbor blocks from solve_direct_fast exactly) ...
+    # Block 1: East
+    rows.append(idx_grid[:-1, :].flatten())
+    cols.append(idx_grid[1:, :].flatten())
+    data.append(-aE[:-1, :].flatten())
+    # Block 2: West
+    rows.append(idx_grid[1:, :].flatten())
+    cols.append(idx_grid[:-1, :].flatten())
+    data.append(-aW[1:, :].flatten())
+    # Block 3: North
+    rows.append(idx_grid[:, :-1].flatten())
+    cols.append(idx_grid[:, 1:].flatten())
+    data.append(-aN[:, :-1].flatten())
+    # Block 4: South
+    rows.append(idx_grid[:, 1:].flatten())
+    cols.append(idx_grid[:, :-1].flatten())
+    data.append(-aS[:, 1:].flatten())
+
+    # Build CSR Matrix
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+    data = np.concatenate(data)
+    A = sparse.coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()
+    
+    # 2. Preconditioner (The Critical Part)
+    # Simple ILU (Incomplete LU) factorization. 
+    # This approximates A ~ L*U without filling in all the zeros.
+    # drop_tol controls how sparse the factors are.
+    try:
+        ilu = spilu(A, drop_tol=1e-4, fill_factor=2.0)
+        M = LinearOperator((n_dofs, n_dofs), matvec=ilu.solve)
+    except RuntimeError:
+        # Fallback if ILU fails (singular matrix)
+        M = None
+
+    # 3. Solve
+    phi_vec, info = bicgstab(A, b.flatten(), x0=x0, M=M, rtol=tol, maxiter=max_iter)
+    
+    if info > 0:
+        print(f"[BiCGSTAB] Warning: Did not converge in {max_iter} iterations.")
+    
+    return phi_vec.reshape((Nr, Nz))
+
+
 def solve_anisotropic_poisson_FV(geom,
                                  sigma_P, sigma_parallel,
                                  ne=None, pe=None, Bz=None, un_theta=None,
@@ -774,3 +1091,148 @@ def solve_anisotropic_poisson_FV(geom,
         print(f"[FV-SOR] iterations = {iters}, residual = {res:.3e}")
 
     return phi, {"iterations": iters, "residual": float(res)}
+
+
+def solve_anisotropic_poisson_FV_direct(geom,
+                                 sigma_P, sigma_parallel,
+                                 ne=None, pe=None, Bz=None, un_theta=None,
+                                 Ji_r=None, Ji_z=None,
+                                 ne_floor=1.0,
+                                 dphi_dz_cathode_top=None,  # array (Nr,) at z=zmax_cathode
+                                 cathode_voltage_profile=None, # array (Nr,) or None
+                                 phi_anode_value=0.0,
+                                 phi0=None, omega=1.8, tol=1e-10, max_iter=50_000,
+                                 verbose=True):
+    """
+    Direct Solver (SuperLU) wrapper for the Finite Volume scheme.
+    Replaces SOR iteration with a single sparse matrix solve.
+    """
+    Nr, Nz = geom.Nr, geom.Nz
+
+    # --- 1. Compute RHS Source ---
+    S = compute_source_S(geom.r, geom.z,
+                         sigma_P, sigma_parallel,
+                         ne, pe,
+                         ne_floor,
+                         Bz=Bz, un_theta=un_theta,
+                         Ji_r=Ji_r, Ji_z=Ji_z,
+                         mask=geom.mask)
+
+    # Zero out source at boundaries/axis to avoid noise
+    S[0,:] = 0
+    S[geom.i_bc_list, geom.j_bc_list] *= 0
+
+    # --- 2. Assemble Coefficients (Numba) ---
+    aP, aE, aW, aN, aS, b = assemble_coefficients(
+        geom.r, geom.z,
+        sigmaP=sigma_P, sigmaPar=sigma_parallel,
+        geom=geom,
+        dphi_dz_cathode_top=dphi_dz_cathode_top,
+        cathode_voltage_profile=cathode_voltage_profile,
+        phi_anode_value=phi_anode_value,
+        S=S
+    )
+
+    # --- 3. Direct Sparse Solve ---
+    # Note: solve_direct_fast builds the matrix A and solves Ax=b
+    phi = solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b)
+
+    # --- 4. Compute Residual (Verification) ---
+    # Since this is not iterative, we manually calculate ||Ax-b|| to confirm precision.
+    # We use numpy array slicing to mimic the neighbor interactions.
+    
+    # Create shifted views for neighbors (padding with 0 where no neighbor exists)
+    phi_E = np.zeros_like(phi); phi_E[:-1, :] = phi[1:, :]   # i+1
+    phi_W = np.zeros_like(phi); phi_W[1:, :]  = phi[:-1, :]  # i-1
+    phi_N = np.zeros_like(phi); phi_N[:, :-1] = phi[:, 1:]   # j+1
+    phi_S = np.zeros_like(phi); phi_S[:, 1:]  = phi[:, :-1]  # j-1
+
+    # LHS = aP*phi - (Neighbors)
+    LHS = (aP * phi) - (aE * phi_E + aW * phi_W + aN * phi_N + aS * phi_S)
+    
+    # Residual = b - LHS
+    res_grid = np.abs(b - LHS)
+    
+    # Mask out solid nodes (where residual is trivially 0)
+    res_grid[geom.mask == 0] = 0.0
+    
+    max_res = np.max(res_grid)
+
+    if verbose:
+        print(f"[FV-DIRECT] iterations = 1, residual = {max_res:.3e}")
+
+    return phi, {"iterations": 1, "residual": float(max_res)}
+
+
+
+def solve_anisotropic_poisson_FV_krylov(geom,
+                                 sigma_P, sigma_parallel,
+                                 ne=None, pe=None, Bz=None, un_theta=None,
+                                 Ji_r=None, Ji_z=None,
+                                 ne_floor=1.0,
+                                 dphi_dz_cathode_top=None,  # array (Nr,) at z=zmax_cathode
+                                 cathode_voltage_profile=None, # array (Nr,) or None
+                                 phi_anode_value=0.0,
+                                 phi0=None, omega=1.8, tol=1e-10, max_iter=50_000,
+                                 verbose=True):
+    """
+    Krylov Iterative Solver (LGMRES) wrapper for the Finite Volume scheme.
+    """
+    Nr, Nz = geom.Nr, geom.Nz
+
+    # --- 1. Compute RHS Source ---
+    S = compute_source_S(geom.r, geom.z,
+                         sigma_P, sigma_parallel,
+                         ne, pe,
+                         ne_floor,
+                         Bz=Bz, un_theta=un_theta,
+                         Ji_r=Ji_r, Ji_z=Ji_z,
+                         mask=geom.mask)
+
+    # Zero out source at boundaries/axis to avoid noise
+    S[0,:] = 0
+    S[geom.i_bc_list, geom.j_bc_list] *= 0
+
+    # --- 2. Assemble Coefficients (Numba) ---
+    aP, aE, aW, aN, aS, b = assemble_coefficients(
+        geom.r, geom.z,
+        sigmaP=sigma_P, sigmaPar=sigma_parallel,
+        geom=geom,
+        dphi_dz_cathode_top=dphi_dz_cathode_top,
+        cathode_voltage_profile=cathode_voltage_profile,
+        phi_anode_value=phi_anode_value,
+        S=S
+    )
+
+    # --- 3. Direct Sparse Solve ---
+    # Note: solve_direct_fast builds the matrix A and solves Ax=b
+    phi = solve_iterative_krylov(Nr, Nz, aP, aE, aW, aN, aS, b, phi0=phi0, tol=tol)
+
+    # --- 4. Compute Residual (Verification) ---
+    # Since this is not iterative, we manually calculate ||Ax-b|| to confirm precision.
+    # We use numpy array slicing to mimic the neighbor interactions.
+    
+    # Create shifted views for neighbors (padding with 0 where no neighbor exists)
+    phi_E = np.zeros_like(phi); phi_E[:-1, :] = phi[1:, :]   # i+1
+    phi_W = np.zeros_like(phi); phi_W[1:, :]  = phi[:-1, :]  # i-1
+    phi_N = np.zeros_like(phi); phi_N[:, :-1] = phi[:, 1:]   # j+1
+    phi_S = np.zeros_like(phi); phi_S[:, 1:]  = phi[:, :-1]  # j-1
+
+    # LHS = aP*phi - (Neighbors)
+    LHS = (aP * phi) - (aE * phi_E + aW * phi_W + aN * phi_N + aS * phi_S)
+    
+    # Residual = b - LHS
+    res_grid = np.abs(b - LHS)
+    
+    # Mask out solid nodes (where residual is trivially 0)
+    res_grid[geom.mask == 0] = 0.0
+    
+    max_res = np.max(res_grid)
+
+    if verbose:
+        print(f"[FV-KRYLOV] residual = {max_res:.3e}")
+
+    return phi, {"residual": float(max_res)}
+
+
+
