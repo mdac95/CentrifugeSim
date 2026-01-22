@@ -114,7 +114,7 @@ class NeutralFluidContainer:
 
     def update_p(self):
         self.p_grid[self.fluid==1] = self.rho_grid[self.fluid==1] * self.Rgas_over_m * self.T_n_grid[self.fluid==1]
-        self.p_grid[-1,:] = self.p_grid[-2,:]  # Does not change anything, just for visualization purposes
+        
 
     def compute_sound_speed(self, Tfield):
         return np.sqrt(self.gamma * self.Rgas_over_m * Tfield)
@@ -192,87 +192,6 @@ class NeutralFluidContainer:
         self.un_z_grid[geom.mask==1]        = np.copy(un_z_new[geom.mask==1])
         self.T_n_grid[geom.mask==1]         = np.copy(Tn_new[geom.mask==1])
 
-    def advance_with_T_ssp_rk2(self,
-                            geom, dt,
-                            c_iso,
-                            apply_bc_vel, apply_bc_temp):
-
-        r, dr, dz = geom.r, geom.dr, geom.dz
-
-        # stage-0
-        rho0 = self.rho_grid.copy()
-        ur0 = self.un_r_grid.copy()
-        ut0 = self.un_theta_grid.copy()
-        uz0 = self.un_z_grid.copy()
-        T0 = self.T_n_grid.copy()
-
-        mub = np.zeros_like(T0)
-
-        # ---------- stage 1: momentum + continuity
-        neutral_fluid_helper.step_isothermal(r, dr, dz, dt,
-                    self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
-                    self.p_grid, self.mu_grid, mub,
-                    c_iso,
-                    fluid=self.fluid, face_r=self.face_r, face_z=self.face_z)
-
-        # stresses for energy (use your masked version if you added one)
-        tau_rr = np.zeros_like(rho0); tau_tt = np.zeros_like(rho0); tau_zz = np.zeros_like(rho0)
-        tau_rz = np.zeros_like(rho0); tau_rt = np.zeros_like(rho0); tau_tz = np.zeros_like(rho0)
-        divu_d = np.zeros_like(rho0)
-        neutral_fluid_helper.stresses(r, self.un_r_grid, self.un_theta_grid, self.un_z_grid, self.mu_grid, mub, dr, dz,
-            tau_rr, tau_tt, tau_zz, tau_rz, tau_rt, tau_tz, divu_d,
-            fluid=self.fluid, face_r=self.face_r, face_z=self.face_z)
-
-        neutral_fluid_helper.step_temperature_masked(r, dr, dz, dt,
-                                self.T_n_grid, self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
-                                self.p_grid, self.kappa_grid,
-                                tau_rr, tau_tt, tau_zz, tau_rz, tau_rt, tau_tz,
-                                self.c_v,
-                                fluid=self.fluid, face_r=self.face_r, face_z=self.face_z)
-
-        # EOS + BCs + projection
-        self.p_grid[:,:] = self.rho_grid * self.Rgas_over_m * self.T_n_grid
-
-        apply_bc_vel(); apply_bc_temp()
-        #if self.fluid is not None:
-        #    neutral_fluid_helper.apply_solid_mask_inplace_T(self.fluid, self.T_n_grid)
-
-        # ---------- stage 2: repeat
-        neutral_fluid_helper.step_isothermal(r, dr, dz, dt,
-                    self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
-                    self.p_grid, self.mu_grid, mub,
-                    c_iso,
-                    fluid=self.fluid, face_r=self.face_r, face_z=self.face_z)
-
-        tau_rr.fill(0.0); tau_tt.fill(0.0); tau_zz.fill(0.0)
-        tau_rz.fill(0.0); tau_rt.fill(0.0); tau_tz.fill(0.0); divu_d.fill(0.0)
-        neutral_fluid_helper.stresses(r, self.un_r_grid, self.un_theta_grid, self.un_z_grid, 
-            self.mu_grid, mub, dr, dz,
-            tau_rr, tau_tt, tau_zz, tau_rz, tau_rt, tau_tz, divu_d,
-            fluid=self.fluid, face_r=self.face_r, face_z=self.face_z)
-
-        neutral_fluid_helper.step_temperature_masked(r, dr, dz, dt,
-                                self.T_n_grid, self.rho_grid,
-                                self.un_r_grid, self.un_theta_grid, self.un_z_grid,
-                                self.p_grid, self.kappa_grid,
-                                tau_rr, tau_tt, tau_zz, tau_rz, tau_rt, tau_tz,
-                                self.c_v,
-                                fluid=self.fluid, face_r=self.face_r, face_z=self.face_z)
-
-        self.p_grid[:,:] = self.rho_grid * self.Rgas_over_m * self.T_n_grid
-
-        apply_bc_vel(); apply_bc_temp()
-
-        # ---------- combine
-        self.rho_grid[:,:]          = 0.5*(rho0 + self.rho_grid)
-        self.un_r_grid [:,:]        = 0.5*(ur0  + self.un_r_grid)
-        self.un_theta_grid [:,:]    = 0.5*(ut0  + self.un_theta_grid)
-        self.un_z_grid [:,:]        = 0.5*(uz0  + self.un_z_grid)
-        self.T_n_grid[:,:]          = 0.5*(T0   + self.T_n_grid)
-        self.p_grid[:,:] = self.rho_grid * self.Rgas_over_m * self.T_n_grid
-
-        apply_bc_vel(); apply_bc_temp()
-
     # --------------------------- Boundary conditions -------------------------
 
     def apply_bc_isothermal(self):
@@ -314,112 +233,15 @@ class NeutralFluidContainer:
         # 2. Bottom Wall (z=0): Fixed Dirichlet
         self.T_n_grid[:,0] = self.T_wall 
 
-        # ---------------------------------------------------------
-        # 2. Radial Wall (r=R): Unified Kinetic Theory BC
-        # ---------------------------------------------------------
-        # We MUST update Nr-1 here to prevent T from crashing to 300K
-        
-        mask_fluid = (self.geom.mask[-1,:] == 1)
-        
-        # A. Gather Neighbor Properties (approaching the wall)
-        T_gas   = self.T_n_grid[-2, mask_fluid]
-        rho_gas = self.rho_grid[-2, mask_fluid]
-        mu_gas  = self.mu_grid[-2, mask_fluid]
-        kap_gas = self.kappa_grid[-2, mask_fluid]
-        
-        # B. Physics Constants
-        kb = constants.kb
-        m  = self.mass
-        gamma = self.gamma
-        cp = self.cp
-        
-        # C. Calculate Mean Free Path (lambda)
-        # v_th = sqrt(8 k T / pi m)
-        v_th = np.sqrt(8.0 * kb * T_gas / (np.pi * m))
-        
-        # lambda = 2 * mu / (rho * v_th)
-        rho_safe = rho_gas
-        lam = 2.0 * mu_gas / (rho_safe * v_th)
-        
-        # D. Calculate Jump Length (L_jump)
-        # Pr = Cp * mu / k
-        Pr = cp * mu_gas / np.maximum(kap_gas, 1e-15)
-        
-        # Coefficients
-        # Use self.alpha (Accommodation Coefficient)
-        # alpha ~ 0.5 allows significant slip (T_wall > 300K)
-        alpha = self.alpha
-        coeff_alpha = (2.0 - alpha) / alpha
-        coeff_gamma = (2.0 * gamma) / (gamma + 1.0)
-        
-        L_jump = coeff_alpha * coeff_gamma * (lam / Pr)
-        L_jump = np.maximum(L_jump, 1e-12)
-        
-        # E. Calculate Effective h
-        h_eff = kap_gas / L_jump
-
-        # F. Apply Robin BC
-        dr = self.geom.dr
-        
-        # Robin Formula: Balance Fluxes
-        # T_wall = (k*T_inner + h*dr*T_fixed) / (k + h*dr)
-        numerator   = (kap_gas * T_gas) + (h_eff * dr * self.T_wall)
-        denominator = kap_gas + (h_eff * dr)
-        
-        self.T_n_grid[-1, mask_fluid] = numerator / denominator
-
-
-    def apply_bc_density_compatible(self):
-        """
-        1. Enforces Radial Equilibrium (dP/dr = 0) at the wall.
-        2. CONSERVES MASS by redistributing the correction to the neighbor node.
-        """
-        # --- A. Geometry & Volumes ---
-        # Volume of Wall Cell (Nr-1) and Neighbor Cell (Nr-2)
-        vol_wall  = self.geom.volume_field[-1, :]
-        vol_neigh = self.geom.volume_field[-2, :]
-        
-        # --- B. Current State ---
-        rho_wall  = self.rho_grid[-1, :]
-        rho_neigh = self.rho_grid[-2, :]
-        
-        T_wall  = np.maximum(self.T_n_grid[-1, :], 1.0)
-        T_neigh = self.T_n_grid[-2, :]
-
-        # --- C. Calculate Constraint (Mass Preservation) ---
-        # We must preserve the total mass currently in the last two cells.
-        mass_skin_old = (rho_wall * vol_wall) + (rho_neigh * vol_neigh)
-        
-        # --- D. Calculate Target (Pressure Equilibrium) ---
-        # We want P_wall = P_neigh  =>  rho_wall_new * T_wall = rho_neigh_new * T_neigh
-        # Implies: rho_wall_new = rho_neigh_new * (T_neigh / T_wall)
-        ratio = T_neigh / T_wall
-        
-        # --- E. Solve System of Equations ---
-        # Eq 1 (Mass): rho_neigh_new * V_n + rho_wall_new * V_w = Mass_old
-        # Eq 2 (Phys): rho_wall_new = rho_neigh_new * ratio
-        #
-        # Substitute: rho_neigh_new * V_n + (rho_neigh_new * ratio) * V_w = Mass_old
-        #             rho_neigh_new * (V_n + ratio * V_w) = Mass_old
-        
-        rho_neigh_new = mass_skin_old / (vol_neigh + ratio * vol_wall)
-        rho_wall_new  = rho_neigh_new * ratio
-        
-        # --- F. Apply ---
-        mask_fluid = (self.geom.mask[-1,:] == 1)
-        self.rho_grid[-1, mask_fluid] = rho_wall_new[mask_fluid]
-        self.rho_grid[-2, mask_fluid] = rho_neigh_new[mask_fluid]
-        
-        # Update auxiliary number density
-        self.nn_grid[-1, :] = self.rho_grid[-1, :] / self.mass
-        self.nn_grid[-2, :] = self.rho_grid[-2, :] / self.mass
+        # 3 Radial Wall (r=R): Fixed Dirichlet
+        self.T_n_grid[-1,:] = self.T_wall 
 
 
     ###########################################################################################
     ### methods for Implicit navier stokes (no test)
     ###########################################################################################
     def advance_semi_implicit(self, geom, dt, c_iso, apply_bc_vel, apply_bc_temp, 
-                              ion_fluid=None, electron_fluid=None):
+                              ion_fluid=None, electron_fluid=None, n_band=8):
         """
         Advances the neutral fluid using Operator Splitting with HYDRO SUB-CYCLING.
         1. Sub-cycled Explicit Advection (Hydro + Energy) to handle acoustic CFL.
@@ -457,17 +279,22 @@ class NeutralFluidContainer:
             T0   = self.T_n_grid.copy()
 
             # --- RK Stage 1 ---
+            self.update_p()
+
             neutral_fluid_helper.step_advection_hydro(r, dr, dz, dt_sub,
                         self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
                         self.p_grid, c_iso, self.nn_floor*self.mass,
                         self.mask_rho, self.mask_vel, self.face_r, self.face_z)
             
+            self.update_p()
+
             neutral_fluid_helper.step_advection_energy(r, dr, dz, dt_sub,
                         self.T_n_grid, self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
                         self.p_grid, self.c_v,
                         self.fluid, self.face_r, self.face_z)
             
             apply_bc_vel(); apply_bc_temp()
+            self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
             self.update_p() 
 
             # --- RK Stage 2 ---
@@ -476,10 +303,16 @@ class NeutralFluidContainer:
                         self.p_grid, c_iso, self.nn_floor*self.mass,
                         self.mask_rho, self.mask_vel, self.face_r, self.face_z)
             
+            self.update_p()
+
             neutral_fluid_helper.step_advection_energy(r, dr, dz, dt_sub,
                         self.T_n_grid, self.rho_grid, self.un_r_grid, self.un_theta_grid, self.un_z_grid,
                         self.p_grid, self.c_v,
                         self.fluid, self.face_r, self.face_z)
+            
+            apply_bc_vel(); apply_bc_temp()
+            self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+            self.update_p()
 
             # --- Average (SSP-RK2) ---
             self.rho_grid[:]       = 0.5 * (rho0 + self.rho_grid)
@@ -489,6 +322,7 @@ class NeutralFluidContainer:
             self.T_n_grid[:]       = 0.5 * (T0   + self.T_n_grid)
             
             apply_bc_vel(); apply_bc_temp()
+            self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
             self.update_p()
 
         # Update nn before collisions
@@ -504,7 +338,9 @@ class NeutralFluidContainer:
              self.update_temperature_collisions_implicit(ion_fluid, electron_fluid, geom, dt)
 
         apply_bc_vel(); apply_bc_temp()
+        self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
         self.update_p()
+        self.update_nn()
 
         # ==========================================================
         # STEP C: IMPLICIT DIFFUSION (Sink) - ONCE PER GLOBAL STEP
@@ -524,20 +360,30 @@ class NeutralFluidContainer:
             self.fluid, self.face_r, self.face_z
         )
 
+        apply_bc_temp()
+        self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+        self.update_p()
+        self.update_nn()
+
+        # Viscosity
+        mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
+             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
+        )
+        self.mu_grid[:,:] = mu_val
+        self.kappa_grid[:,:] = kappa_val
+
         # Thermal Conduction
         neutral_fluid_helper.solve_implicit_heat_sor(
             self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
-            dt, dr, dz, max_iter=400, omega=1.8,
-            mu_grid=self.mu_grid,
-            rho_grid=self.rho_grid,
-            mass=self.mass,
-            gamma=self.gamma,
-            cp=self.cp,
-            T_wall_fixed=self.T_wall,
-            alpha=self.alpha
+            dt, dr, dz, self.T_wall, max_iter=500, omega=1.8,
         )
 
-        # Viscosity
+        apply_bc_temp()
+        self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+        self.update_p()
+        self.update_nn()
+
+        # Update transport coefficients again
         mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
              geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
         )
@@ -548,19 +394,58 @@ class NeutralFluidContainer:
         # Note: should I combine all these kernel calls into one to save some time?
         neutral_fluid_helper.solve_implicit_viscosity_sor(
             self.un_theta_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid,
-            dt, dr, dz, max_iter=400, omega=1.8
+            dt, dr, dz, max_iter=250, omega=1.8
         )
         neutral_fluid_helper.solve_implicit_viscosity_r_sor(
             self.un_r_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid,
-            dt, dr, dz, max_iter=400, omega=1.8
+            dt, dr, dz, max_iter=250, omega=1.8
         )
         neutral_fluid_helper.solve_implicit_viscosity_z_sor(
             self.un_z_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid,
-            dt, dr, dz, max_iter=400, omega=1.8
+            dt, dr, dz, max_iter=250, omega=1.8
         )
 
         apply_bc_vel()
-        self.update_p()
+
+
+    def enforce_wall_dpdr0_mass_conserving_smooth(self, n_band=None):
+        """
+        Enforce dp/dr = 0 at the outer wall node i=Nr-1 by setting p[-1,k]=p[-2,k]
+        through rho[-1,k], while conserving mass locally in a radial band.
+
+        IMPROVEMENT: Uses a weighted distribution to eliminate the discontinuity 
+        at the start of the band (i0).
+        
+        Scaling model:
+        rho_new[i] = rho_old[i] * (1 + delta * weight[i])
+        
+        Where weight[i] increases smoothly from 0 at i0 to 1 at i_neighbor.
+        We solve for scalar 'delta' to ensure exact mass conservation.
+        """
+        Nr = self.rho_grid.shape[0]
+        
+        if n_band is None:
+            n_band = 4
+        
+        # AUTO-SWITCH LOGIC:
+        # If n_band covers most of the radius, use Uniform Weights.
+        # This prevents the "pressure dip" at the wall caused by weighted taxes.
+        use_uniform_weights = False
+        if n_band >= Nr // 2:
+            use_uniform_weights = True
+
+        neutral_fluid_helper.enforce_wall_dpdr0_mass_conserving_smooth_fast(
+            self.rho_grid,
+            self.nn_grid,
+            self.fluid,
+            self.geom.volume_field,
+            self.T_n_grid,
+            self.T_wall,
+            self.mass,
+            self.nn_floor,
+            int(n_band),
+            bool(use_uniform_weights) 
+        )
 
         
     ###########################################################################################
@@ -615,113 +500,11 @@ class NeutralFluidContainer:
             geom.mask
         )
 
-    def update_diffusion_implicit(self, geom, dt):
-        """
-        Applies implicit Viscosity and Thermal Conduction using 
-        pre-calculated mu_grid and kappa_grid fields.
-        """
-        # 1. Update Viscosity (Momentum Sink)
-        neutral_fluid_helper.solve_implicit_viscosity_sor(
-            self.un_theta_grid,
-            self.nn_grid,
-            self.mass,
-            self.fluid,      # The mask
-            self.mu_grid,
-            dt,
-            geom.dr,
-            geom.dz,
-            max_iter=20,
-            omega=1.4
-        )
-        
-        # 2. Update Thermal Conduction (Energy Sink)
-        neutral_fluid_helper.solve_implicit_heat_sor(
-            self.T_n_grid,
-            self.nn_grid,
-            self.mass,
-            self.fluid,
-            self.kappa_grid,
-            self.c_v,
-            dt,
-            geom.dr,
-            geom.dz,
-            max_iter=20,
-            omega=1.4
-        )
+    ###########################################################################################
+    ### Wall Heat Flux Calculations
+    ###########################################################################################
 
-        self.apply_bc_T()
-        self.apply_bc_isothermal()
-
-    def update_vtheta_explicit_force(self, hybrid_pic, geom, dt):
-        """
-        Updates Neutral azimuthal velocity due to collisions with Ions using an explicit formula.
-        Used when fluid ions are on.
-        Do not use this when kinetic ions are on.
-        """
-        neutral_fluid_helper.update_neutral_vtheta_explicit_force(
-            self.un_theta_grid,
-            hybrid_pic.Jir_grid,
-            hybrid_pic.Bz_grid,
-            self.nn_grid,
-            self.mass,
-            dt,
-            geom.mask
-        )
-
-    #######################################################################################################
-    ####################################### TO CALCULATE PARAMS ###########################################
-    #######################################################################################################
-
-    def get_viscous_heating_timescale_field(self, geom):
-        """
-        Computes the local viscous heating timescale field:
-            tau_heat(r,z) = (rho * Cv * T) / Phi(r,z)
-
-        TO DO:
-            UPDATE TO USE GRAD r and z using mask and face areas!!!!
-        """
-        # 1. Get Fields
-        rho = self.rho_grid
-        T   = self.T_n_grid
-        mu  = self.mu_grid
-        vt  = self.un_theta_grid
-        
-        # 2. Compute Gradients
-        r_safe = geom.r.copy()
-        r_safe[0] = 1.0 # Avoid divide by zero
-        
-        # FIX 1: Reshape r_safe to (Nr, 1) for broadcasting against (Nr, Nz)
-        r_col = r_safe[:, None] 
-        
-        # Calculate Angular Velocity Omega = v / r
-        omega = vt / r_col
-        
-        # Gradient along axis 0 (Radial)
-        d_omega_dr = np.gradient(omega, geom.dr, axis=0)
-        
-        # FIX 2: Use the reshaped column r for the shear calculation too
-        shear_r = r_col * d_omega_dr
-        
-        # Axial Shear: d(v)/dz
-        shear_z = np.gradient(vt, geom.dz, axis=1)
-        
-        # 3. Compute Local Dissipation Phi [W/m^3]
-        Phi_grid = mu * (shear_r**2 + shear_z**2)
-        
-        # 4. Compute Timescale
-        E_thermal = rho * self.c_v * T
-        
-        tau_grid = np.zeros_like(T)
-        
-        # Avoid divide by zero / valid mask
-        mask_valid = (geom.mask == 1)
-        tau_grid[mask_valid] = E_thermal[mask_valid] / Phi_grid[mask_valid]
-        
-        # Set regions with no heating to a large number
-        tau_grid[~mask_valid] = 1e9 
-
-        return tau_grid, Phi_grid
-
+    # REVIEW, UPDATE
     def get_wall_heat_flux(self):
         """
         Calculates the heat flux density [W/m^2] dissipated into the radial wall (r=R).
@@ -775,6 +558,7 @@ class NeutralFluidContainer:
         
         return q_wall
 
+    # REVIEW, UPDATE
     def get_total_wall_power(self):
         """
         Integrates the wall heat flux over the radial wall area to get Total Power [W].

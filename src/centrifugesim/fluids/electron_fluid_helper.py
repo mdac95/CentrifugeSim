@@ -919,7 +919,7 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
     
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
-    delta_sheath = 1.0 
+    delta_sheath = 0.1 #1.0 
 
     for i in numba.prange(Nr):
         r_loc = r_coords[i]

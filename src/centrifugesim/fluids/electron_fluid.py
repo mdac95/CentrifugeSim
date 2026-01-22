@@ -462,6 +462,12 @@ class ElectronFluidContainer:
             max_iter=max_iter
         )
         """
+        # TO DO:
+        # Should update kappa here based on new Te after local physics step
+        # ...
+        # ...
+
+        
         self.Te_grid = electron_fluid_helper.solve_Te_diffusion_direct(
             self.Te_grid,
             self.ne_grid,
