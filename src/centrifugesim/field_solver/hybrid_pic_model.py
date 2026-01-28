@@ -9,9 +9,6 @@ from centrifugesim.field_solver.fem_phi_solver import (
 from centrifugesim.field_solver.finite_volume_phi_solver import solve_anisotropic_poisson_FV, solve_anisotropic_poisson_FV_direct, solve_anisotropic_poisson_FV_krylov, compute_E_and_J
 from centrifugesim import constants
 
-from centrifuge.I_300_A_p0_0_30_Torr_0_50_T_test_debugging.v6.post_processing_vs_time import I_anode
-
-
 class HybridPICModel:
     def __init__(self, geom:Geometry, use_fem = False):
 
@@ -233,10 +230,10 @@ class HybridPICModel:
         Er, Ez, Jr, Jz, Er_gradpe, Ez_gradpe = compute_E_and_J(phi, geom,
                             self.sigma_P_grid,
                             self.sigma_parallel_grid,
-                            ne=electron_fluid.ne_grid,
-                            pe=electron_fluid.pe_grid,
-                            Bz=self.Bz_grid,
-                            un_theta=neutral_fluid.un_theta_grid,
+                            #ne=electron_fluid.ne_grid,
+                            #pe=electron_fluid.pe_grid,
+                            #Bz=self.Bz_grid,
+                            #un_theta=neutral_fluid.un_theta_grid,
                             ne_floor=electron_fluid.ne_floor,
                             fill_solid_with_nan=False)
 
