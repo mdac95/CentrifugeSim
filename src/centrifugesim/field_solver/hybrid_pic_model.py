@@ -190,24 +190,7 @@ class HybridPICModel:
             )
 
         else:
-            """
-            phi, info = solve_anisotropic_poisson_FV(
-                geom,
-                self.sigma_P_grid,
-                self.sigma_parallel_grid,
-                ne=electron_fluid.ne_grid,
-                pe=electron_fluid.pe_grid,
-                Bz=self.Bz_grid,
-                un_theta=neutral_fluid.un_theta_grid,
-                ne_floor=electron_fluid.ne_floor,
-                Ji_r=Ji_r, Ji_z=Ji_z,
-                dphi_dz_cathode_top=self.dphi_dz_cathode_top_vec,
-                phi_anode_value=phi_anode_value,
-                phi0=phi0,
-                omega=1.8, tol=tol, max_iter=max_iter,
-                verbose=verbose
-            )
-            """
+
             if(phi0 is None):
                 phi, info = solve_anisotropic_poisson_FV_direct(
                     geom,
