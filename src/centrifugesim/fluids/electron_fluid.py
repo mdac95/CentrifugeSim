@@ -403,7 +403,7 @@ class ElectronFluidContainer:
                            delta_E_eV_ionization, dt, 
                            chem_T_array, chem_k_array,
                            q_RF_grid=None,
-                           max_iter=5000):
+                           closed_top=False):
         """
         Implicit update for Electron Temperature.
         Allows large timesteps by splitting Local Physics and Global Transport.
@@ -420,6 +420,7 @@ class ElectronFluidContainer:
         if q_RF_grid is not None:
             Q_Joule_e_grid += q_RF_grid
 
+        Q_Joule_e_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
         electron_fluid_helper.update_Te_local_physics(
             self.Te_grid,
             self.ne_grid,
@@ -444,24 +445,6 @@ class ElectronFluidContainer:
         # ----------------------------------------------------------------
         r_coords = geom.r
         
-        """
-        electron_fluid_helper.solve_Te_diffusion_implicit_SOR(
-            self.Te_grid,
-            self.ne_grid,
-            self.kappa_parallel_grid,
-            self.kappa_perp_grid,
-            hybrid_pic.br_grid,
-            hybrid_pic.bz_grid,
-            geom.mask,
-            geom.dr,
-            geom.dz,
-            r_coords,
-            dt,
-            ion_fluid.m_i, # Use ion mass for Bohm speed
-            self.Te_floor,
-            max_iter=max_iter
-        )
-        """
         # TO DO:
         # Should update kappa here based on new Te after local physics step
         # ...
@@ -481,7 +464,12 @@ class ElectronFluidContainer:
             r_coords,
             dt,
             ion_fluid.m_i, # Use ion mass for Bohm speed
-            self.Te_floor
+            self.Te_floor,
+            geom.i_cathode_r,
+            geom.j_cathode_r,
+            geom.i_cathode_z_sheath,
+            geom.j_cathode_z_sheath,
+            closed_top=closed_top
         )
 
         
@@ -489,13 +477,10 @@ class ElectronFluidContainer:
         self.Te_grid[geom.cathode_mask] = geom.temperature_cathode
         self.Te_grid[geom.anode1_mask] = geom.temperature_anode
         self.Te_grid[geom.anode2_mask] = geom.temperature_anode
-        self.apply_boundary_conditions()
+        self.apply_boundary_conditions(closed_top)
 
 
-    def apply_boundary_conditions(self):
+    def apply_boundary_conditions(self, closed_top=False):
         
         # Axis of symmetry (r=0): dTe/dr = 0
         self.Te_grid[0, :] = self.Te_grid[1, :]
-
-        # zero flux at symmetry plane
-        self.Te_grid[:, -1] = self.Te_grid[:, -2] # Neumann BC at z = zmax

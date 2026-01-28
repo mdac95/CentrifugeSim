@@ -619,7 +619,8 @@ def assemble_coefficients(
     dphi_dz_cathode_top=None,         # shape (Nr,), gradient at z=zmax_cathode (on plasma side)
     cathode_voltage_profile=None,     # If not None, overrides dphi_dz
     phi_anode_value=0.0,
-    S=None
+    S=None,
+    float_outer_wall_top=False
 ):
     """
     Assemble FV coefficients for:
@@ -649,6 +650,12 @@ def assemble_coefficients(
 
     # Outer wall r=rmax: Dirichlet φ=0 for z >= zmin_anode, else Neumann zero flux
     rmax_dirichlet_by_j = (z >= geom.zmin_anode).astype(np.uint8)
+
+    if float_outer_wall_top:
+        rmax_dirichlet_by_j = rmax_dirichlet_by_j & (z <= geom.zmax_anode)
+    
+    # Convert to uint8 for Numba
+    rmax_dirichlet_by_j = rmax_dirichlet_by_j.astype(np.uint8)
 
     # Cathode top Neumann array
     if dphi_dz_cathode_top is None:
@@ -1101,6 +1108,7 @@ def solve_anisotropic_poisson_FV_direct(geom,
                                  dphi_dz_cathode_top=None,  # array (Nr,) at z=zmax_cathode
                                  cathode_voltage_profile=None, # array (Nr,) or None
                                  phi_anode_value=0.0,
+                                 float_outer_wall_top=False,
                                  phi0=None, omega=1.8, tol=1e-10, max_iter=50_000,
                                  verbose=True):
     """
@@ -1130,7 +1138,8 @@ def solve_anisotropic_poisson_FV_direct(geom,
         dphi_dz_cathode_top=dphi_dz_cathode_top,
         cathode_voltage_profile=cathode_voltage_profile,
         phi_anode_value=phi_anode_value,
-        S=S
+        S=S,
+        float_outer_wall_top=float_outer_wall_top
     )
 
     # --- 3. Direct Sparse Solve ---

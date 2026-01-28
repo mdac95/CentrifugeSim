@@ -901,29 +901,30 @@ def solve_Te_diffusion_implicit_SOR(Te, ne, kappa_par, kappa_perp,
 @numba.jit(nopython=True, parallel=True, cache=True)
 def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp, 
                              br, bz, mask, dr, dz, r_coords, dt, 
-                             mi):
+                             mi, closed_top, 
+                             i_cathode_r, j_cathode_r,
+                             i_cathode_z, j_cathode_z):
     """
-    Finite Difference Assembly (Matches old SOR logic exactly).
-    Replicates the 1/r singularity at the axis to reproduce 'stiff' axis behavior.
+    Finite Difference Assembly with closed top and internal cathode sheath BCs (R and Z).
     """
     Nr, Nz = Te.shape
     kb = constants.kb
     
     # Initialize Matrices
-    aP = np.zeros((Nr, Nz)) # Diagonal
+    aP = np.zeros((Nr, Nz))
     aE = np.zeros((Nr, Nz))
     aW = np.zeros((Nr, Nz))
     aN = np.zeros((Nr, Nz))
     aS = np.zeros((Nr, Nz))
-    b  = np.zeros((Nr, Nz)) # RHS
+    b  = np.zeros((Nr, Nz))
     
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
-    delta_sheath = 0.1 #1.0 
+    delta_sheath = 0.1 
 
+    # --- Main Domain Assembly ---
     for i in numba.prange(Nr):
         r_loc = r_coords[i]
-        # REPLICATE SOR SINGULARITY
         inv_r = 1.0 / (r_loc + 1e-12) 
         
         for j in range(Nz):
@@ -932,13 +933,13 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
                 b[i, j]  = Te[i, j]
                 continue
             
-            # --- 1. Identify Neighbors (Same as SOR) ---
+            # 1. Identify Neighbors
             has_N = (j < Nz-1) and (mask[i, j+1] == 1)
             has_S = (j > 0)    and (mask[i, j-1] == 1)
             has_E = (i < Nr-1) and (mask[i+1, j] == 1)
             has_W = (i > 0)    and (mask[i-1, j] == 1)
             
-            # --- 2. Calculate Tensors (Same as SOR) ---
+            # 2. Tensors
             k_p = kappa_par[i, j]
             k_v = kappa_perp[i, j]
             Br = br[i, j]
@@ -947,64 +948,87 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
             k_rr = k_v + (k_p - k_v) * Br*Br
             k_zz = k_v + (k_p - k_v) * Bz*Bz
             
-            # --- 3. Base Coefficients ---
-            # Note: We compute these "potential" coefficients, 
-            # then set them to 0 later if neighbor doesn't exist, just like SOR.
-            
-            # Radial terms with cylindrical correction
+            # 3. Coefficients
             geom_fac = 0.5 * dr * inv_r
             val_E = k_rr * inv_dr2 * (1.0 + geom_fac)
             val_W = k_rr * inv_dr2 * (1.0 - geom_fac)
-            
-            # Axial terms
             val_N = k_zz * inv_dz2
             val_S = k_zz * inv_dz2
             
-            # Inertia Term (1.5 * n * k / dt)
+            # Inertia
             Cv_term = 1.5 * ne[i, j] * kb / dt
             
-            # --- 4. Boundary Conditions (Same as SOR) ---
-            
-            # NORTH
+            # 4. Standard Boundaries
+            # NORTH (Top)
             if not has_N:
                 val_N = 0.0
+                if j == Nz - 1 and closed_top:
+                    cs = np.sqrt(kb * Te[i, j] / mi)
+                    G_sheath = delta_sheath * ne[i, j] * cs * kb
+                    Cv_term += G_sheath / dz
             
-            # SOUTH
+            # SOUTH (Bottom)
             if not has_S:
                 val_S = 0.0
-                if j == 0: # Physical Wall
+                if j == 0: 
                     cs = np.sqrt(kb * Te[i, j] / mi)
                     G_sheath = delta_sheath * ne[i, j] * cs * kb
                     Cv_term += G_sheath / dz
 
-            # EAST
+            # EAST (Outer Wall)
             if not has_E:
                 val_E = 0.0
-                if i == Nr - 1: # Physical Wall
+                if i == Nr - 1:
                     cs = np.sqrt(kb * Te[i, j] / mi)
                     G_sheath = delta_sheath * ne[i, j] * cs * kb
                     Cv_term += G_sheath / dr
             
-            # WEST
+            # WEST (Axis/Internal)
             if not has_W:
-                val_W = 0.0 # Axis or Mask
+                val_W = 0.0 
             
-            # --- 5. Matrix Assembly ---
-            # SOR equation: 
-            # (Cv + sum_Coeffs) * T_new = RHS_old + sum(Coeff * T_neighbor)
-            # Rearranged for A*x=b:
-            # (Cv + sum_coeffs) * T_center - Coeff_E*T_E ... = RHS_old
-            
+            # 5. Assemble
             aE[i, j] = val_E
             aW[i, j] = val_W
             aN[i, j] = val_N
             aS[i, j] = val_S
             
-            # Diagonal is Sum of neighbor coeffs + Inertia
             aP[i, j] = Cv_term + val_E + val_W + val_N + val_S
-            
-            # RHS is Inertia * T_old
             b[i, j] = (1.5 * ne[i, j] * kb / dt) * Te[i, j]
+
+    # --- SPECIAL CATHODE BOUNDARY LOOPS ---
+
+    # 1. Radial Face (Vertical Wall)
+    # Assumes plasma is at i_c + 1 (Right of cathode)
+    num_pts_r = len(i_cathode_r)
+    for k in range(num_pts_r):
+        i_c = i_cathode_r[k]
+        j_c = j_cathode_r[k]
+        
+        i_p = i_c + 1 # Plasma Node
+        
+        if i_p < Nr and mask[i_p, j_c] == 1:
+            cs = np.sqrt(kb * Te[i_p, j_c] / mi)
+            G_sheath = delta_sheath * ne[i_p, j_c] * cs * kb
+            aP[i_p, j_c] += G_sheath / dr # <--- Divided by dr
+
+    # 2. Axial Face (Horizontal Cap) <--- NEW SECTION
+    # Assumes plasma is at j_c + 1 (Above cathode)
+    num_pts_z = len(i_cathode_z)
+    for k in range(num_pts_z):
+        i_c = i_cathode_z[k]
+        j_c = j_cathode_z[k]
+        
+        j_p = j_c + 1 # Plasma Node (North)
+        
+        # Check bounds and mask
+        if j_p < Nz and mask[i_c, j_p] == 1:
+            cs = np.sqrt(kb * Te[i_c, j_p] / mi)
+            G_sheath = delta_sheath * ne[i_c, j_p] * cs * kb
+            
+            # Add to Diagonal (Sink term)
+            # Divided by dz because this is an axial flux
+            aP[i_c, j_p] += G_sheath / dz  # <--- Divided by dz
 
     return aP, aE, aW, aN, aS, b
 
@@ -1247,7 +1271,10 @@ def solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b):
 
 def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp, 
                               br, bz, mask, dr, dz, r_coords, dt, 
-                              mi, Te_floor, verbose=False):
+                              mi, Te_floor,
+                              i_cathode_r, j_cathode_r,
+                              i_cathode_z, j_cathode_z,
+                              verbose=False, closed_top=False):
     """
     Direct Solver for Anisotropic Electron Heat Diffusion.
     Uses Splu (SuperLU) for robust, instant solution.
@@ -1260,7 +1287,9 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
     aP, aE, aW, aN, aS, b = assemble_Te_diffusion_FD(
         Te, ne, kappa_par, kappa_perp, 
         br, bz, mask, dr, dz, r_coords, dt, 
-        mi
+        mi, closed_top,
+        i_cathode_r, j_cathode_r,
+        i_cathode_z, j_cathode_z,
     )
     
     # 2. Direct Solve (Scipy/SuperLU)
