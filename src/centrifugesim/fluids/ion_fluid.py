@@ -89,7 +89,7 @@ class IonFluidContainer:
         # Call the SOR solver
         ion_fluid_helper.solve_vtheta_viscous_SOR(
             self.vi_theta_grid,                  # In/Out (Uses previous step as guess)
-            hybrid_pic.Jr_grid,           # Input
+            hybrid_pic.Jir_grid,           # Input
             hybrid_pic.Bz_grid,           # Input
             self.ni_grid,                 # Input
             self.nu_i_grid,               # Input
@@ -104,6 +104,42 @@ class IonFluidContainer:
             tol=tol,                     # Tunable
             omega=omega                  # SOR parameter (1.0 = Gauss Seidel)
         )
+
+    def update_vtheta_viscous_implicit(self, hybrid_pic, neutral_fluid, dt, max_iter=10000, tol=1e-4, omega=1.4, closed_top=False):
+        """
+        Updates self.vtheta by solving the full Viscous-Resistive-inertial balance implicitly.
+        Uses the existing self.vtheta as the initial guess for the iterative solver.
+        Note:
+            - self.eta_0 is small so ion viscosity seems to have little effect.
+        """
+        vi_theta_new = np.zeros_like(self.vi_theta_grid)
+        vi_theta_old = self.vi_theta_grid.copy()
+
+        # Call the implicit SOR solver
+        ion_fluid_helper.solve_vtheta_viscous_implicit_SOR(
+            vi_theta_new,                  # In/Out (Uses previous step as guess)
+            vi_theta_old,                  # Input (Old vtheta)
+            hybrid_pic.Jir_grid,           # Input
+            hybrid_pic.Bz_grid,           # Input
+            self.ni_grid,                 # Input
+            self.nu_i_grid,               # Input
+            neutral_fluid.un_theta_grid,  # Input
+            self.eta_0,                   # Input (Viscosity Grid)
+            self.geom.mask,               # Geometry
+            self.geom.dr, 
+            self.geom.dz, 
+            self.geom.r, 
+            self.m_i,
+            dt,
+            max_iter=max_iter,           # Tunable
+            tol=tol,                     # Tunable
+            omega=omega,                  # SOR parameter (1.0 = Gauss Seidel)
+            closed_top=closed_top
+        )
+
+        self.vi_theta_grid[...] = vi_theta_new.copy()
+        del vi_theta_new, vi_theta_old
+
 
     def update_collision_frequencies(self, geom, neutral_fluid):
         """
@@ -177,17 +213,11 @@ class IonFluidContainer:
         self.eta_0[geom.mask==1] = 0.96 * self.ni_grid[geom.mask==1] * constants.kb * self.Ti_grid[geom.mask==1] / self.nu_i_grid[geom.mask==1]
 
     def update_temperature(self, geom, neutral_fluid, electron_fluid, hybrid_pic, dt):
-        """
-        Updates Ion Temperature Ti using pre-calculated Joule heating 
-        and collision frequencies.
-        
-        Requires: 
-        - self.q_ohm_ions_grid (Call update_Ji_Ji_... first!)
-        - electron_fluid.nu_ei_grid (Must be pre-calculated)
-        """
-                
-        ion_fluid_helper.update_Ti_joule_heating_kernel(
-            self.Ti_grid,                 # Output
+        Ti_new = np.zeros_like(self.Ti_grid)
+        Ti_old = self.Ti_grid.copy()
+        ion_fluid_helper.update_Ti_joule_heating_implicit_kernel(
+            Ti_new,                       # Output
+            Ti_old,                       # Input: Old Temperature
             neutral_fluid.T_n_grid,       # Input: Neutral Temp
             electron_fluid.Te_grid,       # Input: Electron Temp
             hybrid_pic.q_ohm_ions_grid,   # Input: Joule Heating Power (W/m^3)
@@ -198,8 +228,11 @@ class IonFluidContainer:
             neutral_fluid.mass,           # Mass Neutral
             geom.mask,                    # Mask
             constants.m_e,                # Constant: Electron Mass
-            constants.kb                  # Constant: Boltzmann
+            constants.kb,                 # Constant: Boltzmann
+            dt                            # Time Step
         )
+        self.Ti_grid[...] = Ti_new.copy()
+        del Ti_new, Ti_old
 
         Ti_new = np.zeros_like(self.Ti_grid)
         Ti_old = self.Ti_grid.copy()

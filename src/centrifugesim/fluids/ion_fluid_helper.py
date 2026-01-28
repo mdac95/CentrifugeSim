@@ -514,21 +514,28 @@ def compute_conductivities_kernel(sigma_P, sigma_par, ni, nu_i, beta_i, Z, q_e, 
                 sigma_P[i, j] = 0.0
 
 @njit(cache=True)
-def update_Ti_joule_heating_kernel(Ti_out, Tn, Te, 
-                                   Q_Joule_ions,
-                                   ni, nu_in, nu_ei, mi, mn, mask, me, kb):
+def update_Ti_joule_heating_implicit_kernel(
+                                Ti_out,
+                                Ti_old,
+                                Tn,
+                                Te, 
+                                Q_Joule_ions,
+                                ni, nu_in, nu_ei, mi, mn, mask, me, kb, dt):
     """
-    Updates Ion Temperature (Ti) using explicit Joule Heating (J*E) as the source.
+    Updates Ion Temperature (Ti) using Implicit Backward Euler.
     
-    Balance:
-    (J_perp^2 / sigma_P) + (J_par^2 / sigma_par) + Q_ie = Q_in_thermal
+    Equation: 1.5 * n * k * (Ti_new - Ti_old) / dt = Q_joule + Q_ie + Q_in
     
-    where Q_in_thermal = 3 * (mi/mn) * ni * nu_in * kb * (Ti - Tn)
+    Note: Q_Joule_ions should already be scaled by 0.5 (as per previous discussion)
+          to represent the Ion share of the total heating.
     """
     Nr, Nz = Ti_out.shape
     
     ratio_me_mi = me / mi
     ratio_mi_mn = mi / mn
+
+    # Pre-calculate constants to save ops inside loop
+    factor_3_2_kb = 1.5 * kb
 
     for i in range(Nr):
         for j in range(Nz):
@@ -536,40 +543,49 @@ def update_Ti_joule_heating_kernel(Ti_out, Tn, Te,
                 n_local = ni[i, j]
                 
                 if n_local > 1e10:
+                    # --- 0. Previous State ---
+                    Ti_prev = Ti_old[i, j]
+
                     # --- 1. Joule Heating (Source) ---
+                    # ENSURE THIS INPUT IS SCALED BY 0.5 BEFORE CALLING THIS FUNCTION
                     Q_joule = Q_Joule_ions[i, j]
-                   
-                    # --- 2. Electron-Ion Heat Transfer (Source/Sink) ---
+                    
+                    # --- 2. Coefficients for Implicit Solve ---
                     Te_local = Te[i, j]
                     Tn_local = Tn[i, j]
-                    
-                    # nu_ei
                     nu_ei_local = nu_ei[i, j]
+                    nu_in_local = nu_in[i, j]
 
-                    # Q_ie coeff: A * (Te - Ti)
-                    # A = 3 * (me/mi) * n * nu_ei * kb
+                    # Coefficient A (Electron-Ion): Q_ie = A * (Te - Ti_new)
                     A_coeff = 3.0 * ratio_me_mi * n_local * nu_ei_local * kb
                     
-                    # --- 3. Neutral Cooling (Sink) ---
-                    # Q_in coeff: B * (Ti - Tn)
-                    # B = 3 * (mi/mn) * n * nu_in * kb
-                    # Note: We use only the thermal relaxation part here
-                    nu_in_local = nu_in[i, j]
+                    # Coefficient B (Ion-Neutral): Q_in = B * (Tn - Ti_new) -> -B * (Ti_new - Tn)
+                    # Note: Using thermal relaxation coeff
                     B_coeff = 3.0 * ratio_mi_mn * n_local * nu_in_local * kb
                     
-                    # --- 4. Solve Balance ---
-                    # Q_joule + A(Te - Ti) = B(Ti - Tn)
-                    # Q_joule + A*Te + B*Tn = (A + B) * Ti
+                    # Coefficient C (Time Inertia): Term from LHS
+                    # C = 1.5 * n * k / dt
+                    C_coeff = (factor_3_2_kb * n_local) / dt
                     
-                    denom = A_coeff + B_coeff
-                    if denom > 1e-12:
-                        Ti_new = (Q_joule + A_coeff * Te_local + B_coeff * Tn_local) / denom
+                    # --- 3. Implicit Update ---
+                    # Algebra:
+                    # C * (Ti_new - Ti_prev) = Q_joule + A*(Te - Ti_new) - B*(Ti_new - Tn)
+                    # C*Ti_new + A*Ti_new + B*Ti_new = C*Ti_prev + Q_joule + A*Te + B*Tn
+                    # Ti_new * (C + A + B) = RHS
+                    
+                    numerator = (C_coeff * Ti_prev) + Q_joule + (A_coeff * Te_local) + (B_coeff * Tn_local)
+                    denominator = C_coeff + A_coeff + B_coeff
+                    
+                    if denominator > 1e-12:
+                        Ti_new = numerator / denominator
                         Ti_out[i, j] = Ti_new
                     else:
                         Ti_out[i, j] = Tn_local
                 else:
+                    # Vacuum / Low Density fallback
                     Ti_out[i, j] = Tn[i, j]
             else:
+                # Masked region
                 Ti_out[i, j] = 300.0
 
 @njit(cache=True)
@@ -673,6 +689,131 @@ def solve_vtheta_viscous_SOR(vtheta, Jr, Bz, ni, nu_in, un_theta, eta,
         
         if max_diff < tol:
             break
+
+@njit(cache=True)
+def solve_vtheta_viscous_implicit_SOR(vtheta, vtheta_old, Jr, Bz, ni, nu_in, un_theta, eta, 
+                                      mask, dr, dz, r_coords, mi, dt,
+                                      max_iter=10000, tol=1e-5, omega=1.4, closed_top=False):
+    """
+    Solves Time-Dependent Momentum Equation using Implicit SOR.
+    Includes Inertia, Lorentz, Drag, and Viscosity terms.
+    
+    Boundary Conditions:
+      - r=0 (Axis): No-Slip (v=0) [Physical requirement for v_theta]
+      - r=R (Wall): No-Slip (v=0)
+      - z=0 (Inlet): No-Slip (v=0)
+      - z=L (Outlet): 
+            If closed_top=False: Neumann (dv/dz=0) -> v[end] = v[end-1]
+            If closed_top=True:  No-Slip (v=0)
+    """
+    Nr, Nz = vtheta.shape
+    
+    # 1. Pre-Clean Dirichlet Boundaries
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 0:
+                vtheta[i, j] = 0.0
+            
+            # Force zero at: Axis (i=0), Outer Wall (i=Nr-1), Bottom (j=0)
+            if i == 0 or i == Nr - 1 or j == 0: 
+                vtheta[i, j] = 0.0
+            
+            # If closed_top is active, force top to 0
+            if closed_top and j == Nz - 1:
+                vtheta[i, j] = 0.0
+
+    # Geometric factors
+    inv_dr2 = 1.0 / (dr * dr)
+    inv_dz2 = 1.0 / (dz * dz)
+    inv_2dr = 1.0 / (2.0 * dr)
+    
+    # SOR Iteration Loop
+    for k in range(max_iter):
+        max_diff = 0.0
+        
+        # Inner nodes (excluding i=0, i=Nr-1, j=0, j=Nz-1)
+        # Note: i starts at 1 because i=0 is now fixed to 0.0
+        for i in range(1, Nr - 1): 
+            for j in range(1, Nz - 1): 
+                
+                # Check 1: Is this plasma?
+                if mask[i, j] == 1:
+                    
+                    # Check 2: Internal Wall / Padding Fix
+                    if (mask[i+1, j] == 0 or mask[i-1, j] == 0 or 
+                        mask[i, j+1] == 0 or mask[i, j-1] == 0):
+                        vtheta[i, j] = 0.0
+                        continue
+                    
+                    # --- Physics Parameters ---
+                    n_loc = ni[i, j]
+                    nu_loc = nu_in[i, j]
+                    eta_loc = eta[i, j]
+                    rho_loc = mi * n_loc
+                    
+                    # --- Coefficients ---
+                    C_inertia = rho_loc / dt
+                    C_drag = rho_loc * nu_loc
+                    
+                    # Viscous Diagonal
+                    r_local = r_coords[i]
+                    inv_r = 1.0 / r_local
+                    inv_r2 = inv_r * inv_r
+                    visc_diag = eta_loc * (2.0 * inv_dr2 + 2.0 * inv_dz2 + inv_r2)
+                    
+                    # --- Forces & Neighbors ---
+                    F_L = -1.0 * Jr[i, j] * Bz[i, j]
+                    
+                    v_ip = vtheta[i+1, j]
+                    v_im = vtheta[i-1, j]
+                    v_jp = vtheta[i, j+1]
+                    v_jm = vtheta[i, j-1]
+                    
+                    visc_r_part = eta_loc * ( (v_ip + v_im) * inv_dr2 + (v_ip - v_im) * inv_2dr * inv_r )
+                    visc_z_part = eta_loc * ( (v_jp + v_jm) * inv_dz2 )
+                    
+                    # --- SOR Update ---
+                    Coeff = C_inertia + C_drag + visc_diag
+                    RHS = (C_inertia * vtheta_old[i, j]) + \
+                          F_L + \
+                          (C_drag * un_theta[i, j]) + \
+                          visc_r_part + visc_z_part
+                    
+                    if Coeff > 1e-20:
+                        v_star = RHS / Coeff
+                        diff = abs(v_star - vtheta[i, j])
+                        vtheta[i, j] = (1.0 - omega) * vtheta[i, j] + omega * v_star
+                        if diff > max_diff:
+                            max_diff = diff
+                    else:
+                        vtheta[i, j] = 0.0
+                else:
+                    vtheta[i, j] = 0.0
+
+        # --- Apply Boundary Conditions (Post-Iter Update) ---
+
+        # 1. Axis (r=0) is ALREADY 0.0 from pre-clean and loop range (i starting at 1).
+
+        # 2. z = L (Top)
+        if closed_top:
+            # Dirichlet (Closed) -> Already set to 0, enforce safety
+            for i in range(Nr):
+                vtheta[i, Nz-1] = 0.0
+        else:
+            # Neumann (Open) -> v[last] = v[last-1]
+            for i in range(Nr):
+                if mask[i, Nz-1] == 1:
+                    # Avoid copying from solid walls
+                    if mask[i, Nz-2] == 1:
+                        vtheta[i, Nz-1] = vtheta[i, Nz-2]
+                    else:
+                        vtheta[i, Nz-1] = 0.0
+        
+        # Check Convergence
+        if max_diff < tol:
+            break
+            
+    return max_diff
 
 
 @njit(cache=True)
