@@ -9,7 +9,6 @@ from centrifugesim.field_solver.fem_phi_solver import (
 from centrifugesim.field_solver.finite_volume_phi_solver import solve_anisotropic_poisson_FV, solve_anisotropic_poisson_FV_direct, solve_anisotropic_poisson_FV_krylov, compute_E_and_J
 from centrifugesim import constants
 
-
 class HybridPICModel:
     def __init__(self, geom:Geometry, use_fem = False):
 
@@ -231,10 +230,10 @@ class HybridPICModel:
         Er, Ez, Jr, Jz, Er_gradpe, Ez_gradpe = compute_E_and_J(phi, geom,
                             self.sigma_P_grid,
                             self.sigma_parallel_grid,
-                            ne=electron_fluid.ne_grid,
-                            pe=electron_fluid.pe_grid,
-                            Bz=self.Bz_grid,
-                            un_theta=neutral_fluid.un_theta_grid,
+                            #ne=electron_fluid.ne_grid,
+                            #pe=electron_fluid.pe_grid,
+                            #Bz=self.Bz_grid,
+                            #un_theta=neutral_fluid.un_theta_grid,
                             ne_floor=electron_fluid.ne_floor,
                             fill_solid_with_nan=False)
 
@@ -268,30 +267,6 @@ class HybridPICModel:
         
     # -------- Calculate electrodes currents
     def compute_electrode_currents(self, geom, return_parts=False):
-        """
-        Compute cathode and anode currents (positive = into the electrode) for an axisymmetric RZ grid.
-
-        Parameters
-        ----------
-        geom : Geometry
-            Geometry object (as in your code). Assumes:
-            - zmin == 0.0 (domain starts at 0)
-            - anode 'upper' radial boundary is at rmax
-            - geom.zmax_anode2 already set (zmin_anode2 + (zmax_anode - zmin_anode))
-        Jer, Jez : np.ndarray, shape (Nr, Nz)
-            Radial and axial current density components [A/m^2].
-            Arrays are defined on the same (r,z) nodes as geom.r, geom.z.
-        return_parts : bool, default False
-            If True, also return a dict with individual face contributions for debugging.
-
-        Returns
-        -------
-        I_anode : float
-            Total current into the anode [A].
-        I_cathode : float
-            Total current into the cathode [A].
-        parts : dict (optional)
-            Individual contributions; only returned if return_parts=True.
         """
         # --- helpers ---------------------------------------------------------------
         Jr = self.Jr_grid
@@ -412,6 +387,16 @@ class HybridPICModel:
 
         if return_parts:
             return I_anode, I_cathode, parts
+        return I_anode, I_cathode
+        """
+        I_cathode = 0.0
+        # cathode current rmax_cathode (Jr)
+        I_cathode += np.trapz(self.Jr_grid[geom.i_cathode_r+1, geom.j_cathode_r]*geom.rmax_cathode*2*np.pi,geom.z[geom.j_cathode_r])
+        # cathode current zmax_cathode (Jz)
+        I_cathode += np.trapz(2*np.pi*geom.r[:geom.i_cath_max]*self.Jz_grid[:geom.i_cath_max, geom.j_cath_max+1], geom.r[:geom.i_cath_max])
+
+        I_anode = 0.0
+       
         return I_anode, I_cathode
 
     #-----------------------------------------------------------------------------

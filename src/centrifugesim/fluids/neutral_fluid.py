@@ -166,31 +166,6 @@ class NeutralFluidContainer:
         
         return Kn_grid
 
-    def update_u_in_collisions(self, geom, ni_grid, mi,
-                                    ui_r, ui_t, ui_z,
-                                    nu_in, Ti, dt):
-        """
-        Updates Neutral velocity due to collisions with Ions. Explicit equation and it also updates gas temperature
-        Used when kinetic ions where on (as fluid counterpart of the MCC module used on kinetic ions).
-        Do not use this when fluid ions are on.
-        """
-
-        dtnu_max = nu_in[geom.mask==1].max()*dt
-        if(round(dtnu_max,2)>0.1):
-            print("dt*nu_in.max() > 0.1 !", dtnu_max)
-
-        un_r_new, un_t_new, un_z_new, Tn_new = neutral_fluid_helper.update_u_in_collisions(
-                                        geom.mask, ni_grid*mi, self.rho_grid,
-                                        ui_r, ui_t, ui_z,
-                                        self.un_r_grid, self.un_theta_grid, self.un_z_grid,
-                                        nu_in, self.nn_floor*self.mass,
-                                        self.T_n_grid, Ti, self.c_v, dt)
-                                        
-        self.un_r_grid[geom.mask==1]        = np.copy(un_r_new[geom.mask==1])
-        self.un_theta_grid[geom.mask==1]    = np.copy(un_t_new[geom.mask==1])
-        self.un_z_grid[geom.mask==1]        = np.copy(un_z_new[geom.mask==1])
-        self.T_n_grid[geom.mask==1]         = np.copy(Tn_new[geom.mask==1])
-
     # --------------------------- Boundary conditions -------------------------
 
     def apply_bc_isothermal(self, closed_top=False):
@@ -515,7 +490,7 @@ class NeutralFluidContainer:
 
         
     ###########################################################################################
-    ### Methods used when fluid ions are on - test functions for implicit, not final (not kinetic ions)
+    ### Methods used when fluid ions are on (not kinetic ions)
     ###########################################################################################
 
     # To test temperature update implicit due to collisions
@@ -567,7 +542,7 @@ class NeutralFluidContainer:
         )
 
     ###########################################################################################
-    ### Wall Heat Flux Calculations
+    ### Wall Heat Flux Calculations, (FIX, REFACTOR LATER)
     ###########################################################################################
 
     # REVIEW, UPDATE
