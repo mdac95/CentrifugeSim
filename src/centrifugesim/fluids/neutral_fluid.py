@@ -498,14 +498,6 @@ class NeutralFluidContainer:
         """
         Updates T_gas implicitly based on elastic collisions with Electrons and Ions.
         """
-        # Add Frictional Heating due to ion-neutral slip (Explicit)
-        neutral_fluid_helper.add_ion_neutral_frictional_heating(
-            self.T_n_grid,
-            self.un_theta_grid, ion_fluid.vi_theta_grid,
-            ion_fluid.ni_grid, self.nn_grid, ion_fluid.nu_i_grid,
-            ion_fluid.m_i, self.mass, self.c_v, dt, geom.mask
-        )
-
         # Apply Thermal Relaxation (Implicit)
         neutral_fluid_helper.update_neutral_temperature_implicit(
             self.T_n_grid,          # In/Out: Updated in place

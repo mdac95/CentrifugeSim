@@ -177,15 +177,7 @@ class IonFluidContainer:
         self.eta_0[geom.mask==1] = 0.96 * self.ni_grid[geom.mask==1] * constants.kb * self.Ti_grid[geom.mask==1] / self.nu_i_grid[geom.mask==1]
 
     def update_temperature(self, geom, neutral_fluid, electron_fluid, hybrid_pic, dt):
-        """
-        Updates Ion Temperature Ti using pre-calculated Joule heating 
-        and collision frequencies.
-        
-        Requires: 
-        - self.q_ohm_ions_grid (Call update_Ji_Ji_... first!)
-        - electron_fluid.nu_ei_grid (Must be pre-calculated)
-        """
-                
+               
         ion_fluid_helper.update_Ti_joule_heating_kernel(
             self.Ti_grid,                 # Output
             neutral_fluid.T_n_grid,       # Input: Neutral Temp

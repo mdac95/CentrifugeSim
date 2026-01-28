@@ -795,7 +795,6 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,
                     
         if max_diff < 1e-4: break
 
-
 @njit(cache=True)
 def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid, source_term, 
                                   dt, dr, dz, max_iter=20, omega=1.4, closed_top=False):
