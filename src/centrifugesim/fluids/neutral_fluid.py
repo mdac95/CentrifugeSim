@@ -114,7 +114,6 @@ class NeutralFluidContainer:
 
     def update_p(self):
         self.p_grid[self.fluid==1] = self.rho_grid[self.fluid==1] * self.Rgas_over_m * self.T_n_grid[self.fluid==1]
-        
 
     def compute_sound_speed(self, Tfield):
         return np.sqrt(self.gamma * self.Rgas_over_m * Tfield)
@@ -194,7 +193,7 @@ class NeutralFluidContainer:
 
     # --------------------------- Boundary conditions -------------------------
 
-    def apply_bc_isothermal(self):
+    def apply_bc_isothermal(self, closed_top=False):
         Nr, Nz = self.rho_grid.shape
 
         # --- Axis r = 0 (i = 0): regularity ---
@@ -212,10 +211,15 @@ class NeutralFluidContainer:
         self.un_theta_grid[:,0] = 0.0
         self.un_z_grid[:,0] = 0.0
 
-        # --- Top plate z = L (k = Nz-1): no-slip, impermeable ---
-        self.un_r_grid[:,-1] = self.un_r_grid[:,-2]
-        self.un_theta_grid[:,-1] = self.un_theta_grid[:,-2]
-        self.un_z_grid[:,-1] = 0.0
+        # --- Top plate z = L (k = Nz-1) ---
+        if closed_top:
+            self.un_r_grid[:,-1] = 0.0         # No-slip
+            self.un_theta_grid[:,-1] = 0.0     # No-slip
+            self.un_z_grid[:,-1] = 0.0         # Impermeable
+        else:
+            self.un_r_grid[:,-1] = self.un_r_grid[:,-2]         # Slip (Neumann)
+            self.un_theta_grid[:,-1] = self.un_theta_grid[:,-2] # Slip (Neumann)
+            self.un_z_grid[:,-1] = 0.0                          # Impermeable
 
         # no slip solid surfaces inside domain
         self.un_r_grid[self.i_bc_list, self.j_bc_list] = 0.0
@@ -223,17 +227,22 @@ class NeutralFluidContainer:
         self.un_z_grid[self.i_bc_list, self.j_bc_list] = 0.0
 
 
-    def apply_bc_T(self):
+    def apply_bc_T(self, closed_top=False):
         Nr, Nz = self.T_n_grid.shape
 
-        # 1. Symmetry Boundaries
+        # Axis
         self.T_n_grid[0,:] = self.T_n_grid[1,:]       # r=0
-        self.T_n_grid[:,-1] = self.T_n_grid[:,-2]     # z=L
+
+        # --- Top Boundary ---
+        if closed_top:
+            self.T_n_grid[:,-1] = self.T_wall         # Fixed Wall Temp
+        else:
+            self.T_n_grid[:,-1] = self.T_n_grid[:,-2] # Adiabatic / Symmetry
         
-        # 2. Bottom Wall (z=0): Fixed Dirichlet
+        # Bottom Wall (z=0): Fixed Dirichlet
         self.T_n_grid[:,0] = self.T_wall 
 
-        # 3 Radial Wall (r=R): Fixed Dirichlet
+        # Radial Wall (r=R): Fixed Dirichlet
         self.T_n_grid[-1,:] = self.T_wall 
 
 
@@ -241,7 +250,7 @@ class NeutralFluidContainer:
     ### methods for Implicit navier stokes (no test)
     ###########################################################################################
     def advance_semi_implicit(self, geom, dt, c_iso, apply_bc_vel, apply_bc_temp, 
-                              ion_fluid=None, electron_fluid=None, n_band=8):
+                              ion_fluid=None, electron_fluid=None, n_band=4, closed_top=False):
         """
         Advances the neutral fluid using Operator Splitting with HYDRO SUB-CYCLING.
         1. Sub-cycled Explicit Advection (Hydro + Energy) to handle acoustic CFL.
@@ -286,6 +295,7 @@ class NeutralFluidContainer:
                         self.p_grid, c_iso, self.nn_floor*self.mass,
                         self.mask_rho, self.mask_vel, self.face_r, self.face_z)
             
+            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p()
 
             neutral_fluid_helper.step_advection_energy(r, dr, dz, dt_sub,
@@ -293,8 +303,8 @@ class NeutralFluidContainer:
                         self.p_grid, self.c_v,
                         self.fluid, self.face_r, self.face_z)
             
-            apply_bc_vel(); apply_bc_temp()
-            self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+            apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
+            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p() 
 
             # --- RK Stage 2 ---
@@ -310,8 +320,8 @@ class NeutralFluidContainer:
                         self.p_grid, self.c_v,
                         self.fluid, self.face_r, self.face_z)
             
-            apply_bc_vel(); apply_bc_temp()
-            self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+            apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
+            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p()
 
             # --- Average (SSP-RK2) ---
@@ -321,8 +331,8 @@ class NeutralFluidContainer:
             self.un_z_grid[:]      = 0.5 * (uz0  + self.un_z_grid)
             self.T_n_grid[:]       = 0.5 * (T0   + self.T_n_grid)
             
-            apply_bc_vel(); apply_bc_temp()
-            self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+            apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
+            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p()
 
         # Update nn before collisions
@@ -337,8 +347,8 @@ class NeutralFluidContainer:
         if (ion_fluid is not None) and (electron_fluid is not None):
              self.update_temperature_collisions_implicit(ion_fluid, electron_fluid, geom, dt)
 
-        apply_bc_vel(); apply_bc_temp()
-        self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+        apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
+        #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
         self.update_p()
         self.update_nn()
 
@@ -360,8 +370,8 @@ class NeutralFluidContainer:
             self.fluid, self.face_r, self.face_z
         )
 
-        apply_bc_temp()
-        self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+        apply_bc_temp(closed_top=closed_top)
+        #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
         self.update_p()
         self.update_nn()
 
@@ -375,37 +385,93 @@ class NeutralFluidContainer:
         # Thermal Conduction
         neutral_fluid_helper.solve_implicit_heat_sor(
             self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
-            dt, dr, dz, self.T_wall, max_iter=500, omega=1.8,
+            dt, dr, dz, self.T_wall, self.geom.temperature_cathode, self.geom.i_cath_max, self.geom.j_cath_max,
+            max_iter=500, omega=1.8,
+            closed_top=closed_top
         )
 
-        apply_bc_temp()
-        self.enforce_wall_dpdr0_mass_conserving_smooth(n_band)
+        apply_bc_temp(closed_top=closed_top)
+        #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
         self.update_p()
         self.update_nn()
 
-        # Update transport coefficients again
+        # Update Transport Coeffs
         mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
              geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
         )
         self.mu_grid[:,:] = mu_val
         self.kappa_grid[:,:] = kappa_val
 
-        # Viscosity
-        # Note: should I combine all these kernel calls into one to save some time?
+        # Calculate Bulk Viscosity (Physical + Artificial)
+        # Using the logic from your old 'step_isothermal'
+        # mub_eff = mub + 0.02 * rho * c_iso * h
+        
+        # Grid spacing h
+        h = min(geom.dr, geom.dz) 
+        
+        # Physical Bulk Viscosity (if any, typically 0 for monoatomic, but let's allow a placeholder)
+        # If you have a physical value, add it here. For now assuming 0 physical.
+        mub_physical = 0.0 
+        
+        # Artificial Bulk Viscosity
+        # Note: c_iso is passed to this function
+        mub_grid = mub_physical + 0.02 * self.rho_grid * c_iso * h
+        
+        # Mask solids
+        mub_grid[self.fluid == 0] = 0.0
+
+        # Compute Explicit Cross-Term Sources
+        Sr, St, Sz = neutral_fluid_helper.compute_viscous_cross_terms(
+            r, dr, dz, 
+            self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+            self.mu_grid,
+            mub_grid,
+            self.face_r, self.face_z
+        )
+
+        # Solve Azimuthal 
         neutral_fluid_helper.solve_implicit_viscosity_sor(
-            self.un_theta_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid,
-            dt, dr, dz, max_iter=250, omega=1.8
+            self.un_theta_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, St,
+            dt, dr, dz, max_iter=250, omega=1.8, closed_top=closed_top
         )
+
+        # Solve Radial (Pass Sr)
         neutral_fluid_helper.solve_implicit_viscosity_r_sor(
-            self.un_r_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid,
-            dt, dr, dz, max_iter=250, omega=1.8
+            self.un_r_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, Sr,
+            dt, dr, dz, max_iter=250, omega=1.8, closed_top=closed_top
         )
+        
+        # Solve Axial (Pass Sz)
         neutral_fluid_helper.solve_implicit_viscosity_z_sor(
-            self.un_z_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid,
+            self.un_z_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, Sz,
             dt, dr, dz, max_iter=250, omega=1.8
         )
 
-        apply_bc_vel()
+        apply_bc_vel(closed_top=closed_top)
+
+
+    def enforce_wall_dpdr0_mass_conserving_weighted(self, n_band=4):
+        """
+        Enforce dp/dr = 0 at the outer wall node i=Nr-1 by setting p[-1,k]=p[-2,k]
+        through rho[-1,k], while conserving mass locally in a radial band.
+
+        Scaling model:
+        rho_new[i] = rho_old[i] * (1 + delta * weight[i])
+        
+        Where weight[i] increases linearly from 0 at i0 to 1 at i_neighbor.
+        We solve for scalar 'delta' to ensure exact mass conservation.
+        """
+        neutral_fluid_helper.enforce_wall_dpdr0_mass_conserving_smooth_fast_weighted(
+            self.rho_grid,
+            self.nn_grid,
+            self.fluid,
+            self.geom.volume_field,
+            self.T_n_grid,
+            self.T_wall,
+            self.mass,
+            self.nn_floor,
+            int(n_band)
+        )
 
 
     def enforce_wall_dpdr0_mass_conserving_smooth(self, n_band=None):

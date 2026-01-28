@@ -429,6 +429,39 @@ def compute_nu_i_kernel(nu_i_out, ni, Ti, nn, Tn, Z, mi, sigma_cx, mask, vi_t, u
                 nu_i_out[i, j] = 0.0
 
 @njit(cache=True)
+def compute_thermal_conductivity_kernel(k_par_out, k_perp_out, ni, Ti, nu_i, beta_i, mi, mask):
+    """
+    Computes Ion Thermal Conductivities.
+    
+    Formulas:
+        k_par  = (ni * kb^2 * Ti) / (mi * nu_i)
+        k_perp = k_par / (1 + beta^2)
+    """
+    Nr, Nz = k_par_out.shape
+    kb = constants.kb
+    
+    # Pre-calculate constant factor: kb^2 / mi
+    const_factor = (kb * kb) / mi
+    
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                # --- 1. Parallel Conductivity ---
+                # k_par = (ni * kb^2 * Ti) / (mi * nu_i)
+                k_par = (ni[i, j] * Ti[i, j] * const_factor) / nu_i[i, j]
+                
+                # --- 2. Perpendicular Conductivity ---
+                # k_perp = k_par / (1 + beta^2)
+                beta_sq = beta_i[i, j] * beta_i[i, j]
+                k_perp = k_par / (1.0 + beta_sq)
+                
+                k_par_out[i, j] = k_par
+                k_perp_out[i, j] = k_perp
+            else:
+                k_par_out[i, j] = 0.0
+                k_perp_out[i, j] = 0.0
+
+@njit(cache=True)
 def compute_beta_i_kernel(beta_i_out, nu_i, Bz, Z, q_e, mi, mask):
     """
     Computes Ion Hall Parameter: beta_i = wci / nu_i
@@ -640,3 +673,140 @@ def solve_vtheta_viscous_SOR(vtheta, Jr, Bz, ni, nu_in, un_theta, eta,
         
         if max_diff < tol:
             break
+
+
+@njit(cache=True)
+def solve_heat_conduction_sor_kernel(Ti, Ti_old, ni, k_par, k_perp, br, bz, mask, 
+                                     dt, dr, dz, r_coords, 
+                                     sor_omega=1.4, max_iter=2000, tol=1e-5):
+    """
+    Implicit SOR Solver for Anisotropic Ion Heat Conduction.
+    Returns: max_diff (float) - The maximum change in T during the last iteration.
+    """
+    Nr, Nz = Ti.shape
+    kb = constants.kb
+    
+    dr2 = dr * dr
+    dz2 = dz * dz
+    factor_t = 1.5 * kb / dt 
+
+    # Initialize max_diff to a high value in case max_iter is 0
+    max_diff = 0.0
+
+    # Loop for SOR Iterations
+    for it in range(max_iter):
+        max_diff = 0.0
+        
+        for i in range(Nr):
+            for j in range(Nz):
+                
+                if mask[i, j] == 0:
+                    continue
+
+                # --- 1. Physics Coefficients ---
+                b_r_val = br[i, j]
+                b_z_val = bz[i, j]
+                kp = k_par[i, j]
+                ks = k_perp[i, j]
+                
+                # Tensor Elements
+                K_rr = kp * b_r_val**2 + ks * (1.0 - b_r_val**2)
+                K_zz = kp * b_z_val**2 + ks * (1.0 - b_z_val**2)
+                K_rz = (kp - ks) * b_r_val * b_z_val
+
+                # --- 2. Discretization Coefficients ---
+                r_i = r_coords[i]
+                
+                # Avoid division by zero at axis
+                if r_i < 1e-12:
+                    r_denom = 1e-12
+                else:
+                    r_denom = r_i
+
+                r_plus = r_coords[i] + 0.5 * dr
+                r_minus = r_coords[i] - 0.5 * dr
+                
+                # --- EAST (i+1) ---
+                if i < Nr - 1 and mask[i+1, j] == 1:
+                    a_E = (K_rr * r_plus) / (r_denom * dr2)
+                    T_E = Ti[i+1, j]
+                else:
+                    a_E = 0.0
+                    T_E = 0.0 
+
+                # --- WEST (i-1) ---
+                # At i=0 (Axis), r_minus <= 0. Symmetry implies No Flux -> a_W = 0.
+                if i > 0 and mask[i-1, j] == 1:
+                    a_W = (K_rr * r_minus) / (r_denom * dr2)
+                    T_W = Ti[i-1, j]
+                else:
+                    a_W = 0.0
+                    T_W = 0.0
+
+                # --- NORTH (j+1) ---
+                if j < Nz - 1 and mask[i, j+1] == 1:
+                    a_N = K_zz / dz2
+                    T_N = Ti[i, j+1]
+                else:
+                    a_N = 0.0
+                    T_N = 0.0
+
+                # --- SOUTH (j-1) ---
+                if j > 0 and mask[i, j-1] == 1:
+                    a_S = K_zz / dz2
+                    T_S = Ti[i, j-1]
+                else:
+                    a_S = 0.0
+                    T_S = 0.0
+                    
+                # --- CENTER ---
+                coeff_time = ni[i, j] * factor_t
+                a_C = coeff_time + a_E + a_W + a_N + a_S
+                
+                # --- 3. Explicit Source Terms (Mixed Derivatives) ---
+                # Safe access logic for cross terms
+                ip1 = i + 1 if i < Nr - 1 else i
+                im1 = i - 1 if i > 0 else i
+                jp1 = j + 1 if j < Nz - 1 else j
+                jm1 = j - 1 if j > 0 else j
+
+                # Term 1: 1/r d/dr (r * K_rz * dT/dz)
+                dTdz_E = (Ti[ip1, jp1] - Ti[ip1, jm1]) / (2.0*dz if j>0 and j<Nz-1 else dz)
+                dTdz_W = (Ti[im1, jp1] - Ti[im1, jm1]) / (2.0*dz if j>0 and j<Nz-1 else dz)
+                
+                flux_mixed_E = r_plus * K_rz * dTdz_E
+                flux_mixed_W = r_minus * K_rz * dTdz_W
+                
+                if i == 0: flux_mixed_W = 0.0 # Force zero flux at axis
+                    
+                div_mixed_r = (flux_mixed_E - flux_mixed_W) / (r_denom * dr)
+
+                # Term 2: d/dz (K_rz * dT/dr)
+                dTdr_N = (Ti[ip1, jp1] - Ti[im1, jp1]) / (2.0*dr if i>0 and i<Nr-1 else dr)
+                dTdr_S = (Ti[ip1, jm1] - Ti[im1, jm1]) / (2.0*dr if i>0 and i<Nr-1 else dr)
+                
+                flux_mixed_N = K_rz * dTdr_N
+                flux_mixed_S = K_rz * dTdr_S
+                
+                div_mixed_z = (flux_mixed_N - flux_mixed_S) / dz
+                
+                # RHS Calculation
+                rhs = coeff_time * Ti_old[i, j] + (div_mixed_r + div_mixed_z)
+
+                # --- 4. SOR Update ---
+                T_residual = (rhs + a_E*T_E + a_W*T_W + a_N*T_N + a_S*T_S) / a_C
+                T_new_val = (1.0 - sor_omega) * Ti[i, j] + sor_omega * T_residual
+                
+                # Positivity check
+                if T_new_val < 0.1: T_new_val = 0.1
+                
+                diff = abs(T_new_val - Ti[i, j])
+                if diff > max_diff:
+                    max_diff = diff
+                    
+                Ti[i, j] = T_new_val
+        
+        if max_diff < tol:
+            return max_diff
+            
+    return max_diff

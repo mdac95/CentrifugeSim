@@ -153,13 +153,30 @@ class IonFluidContainer:
             geom.mask
         )
 
+    def update_thermal_conductivity(self, geom):
+        """
+        Calculates Parallel and Perpendicular Thermal Conductivity.
+        kappa_par  = (ni * kb^2 * Ti) / (mi * nu_i)
+        kappa_perp = kappa_par / (1 + beta_i^2)
+        """
+        ion_fluid_helper.compute_thermal_conductivity_kernel(
+            self.kappa_parallel_grid,   # Output
+            self.kappa_perp_grid,       # Output
+            self.ni_grid,               # Input
+            self.Ti_grid,               # Input
+            self.nu_i_grid,             # Input
+            self.beta_i_grid,           # Input
+            self.m_i,
+            geom.mask
+        )
+
     def compute_viscosity_eta0(self, geom):
         """
         Computes parallel viscosity eta_0.
         """
         self.eta_0[geom.mask==1] = 0.96 * self.ni_grid[geom.mask==1] * constants.kb * self.Ti_grid[geom.mask==1] / self.nu_i_grid[geom.mask==1]
 
-    def update_temperature(self, geom, neutral_fluid, electron_fluid, hybrid_pic):
+    def update_temperature(self, geom, neutral_fluid, electron_fluid, hybrid_pic, dt):
         """
         Updates Ion Temperature Ti using pre-calculated Joule heating 
         and collision frequencies.
@@ -183,3 +200,22 @@ class IonFluidContainer:
             constants.m_e,                # Constant: Electron Mass
             constants.kb                  # Constant: Boltzmann
         )
+
+        Ti_new = np.zeros_like(self.Ti_grid)
+        Ti_old = self.Ti_grid.copy()
+        ion_fluid_helper.solve_heat_conduction_sor_kernel(
+            Ti_new,
+            Ti_old,
+            self.ni_grid,                 # Input: Ion Density
+            self.kappa_parallel_grid,     # Input: Parallel Thermal Conductivity
+            self.kappa_perp_grid,         # Input: Perpendicular Thermal Conductivity
+            hybrid_pic.br_grid,           # Input: Radial Magnetic Field
+            hybrid_pic.bz_grid,           # Input: Axial Magnetic Field
+            geom.mask,                    # Mask
+            dt,
+            geom.dr,
+            geom.dz,
+            geom.r,
+        )
+        self.Ti_grid[...] = Ti_new.copy()
+        del Ti_new, Ti_old

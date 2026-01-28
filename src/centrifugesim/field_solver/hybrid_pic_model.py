@@ -168,7 +168,8 @@ class HybridPICModel:
         Ji_r=None, Ji_z=None,
         phi0=None,
         cathode_dirichlet = False,
-        verbose=True):
+        verbose=True,
+        float_outer_wall_top=False):
 
         if(cathode_dirichlet):
             phi, info = solve_anisotropic_poisson_FV(
@@ -220,6 +221,7 @@ class HybridPICModel:
                     Ji_r=Ji_r, Ji_z=Ji_z,
                     dphi_dz_cathode_top=self.dphi_dz_cathode_top_vec,
                     phi_anode_value=phi_anode_value,
+                    float_outer_wall_top=float_outer_wall_top,
                     phi0=phi0,
                     omega=1.8, tol=tol, max_iter=max_iter,
                     verbose=verbose
@@ -268,6 +270,8 @@ class HybridPICModel:
         self.Er_grid_d = cp.asarray(self.Er_grid)
         self.Ez_grid_d = cp.asarray(self.Ez_grid)
 
+        self.q_ohm_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+
         del phi, Er, Ez, Jr, Jz, q_ohm
 
     def update_Je_Ji_and_compute_DC_power_e_and_i(self, geom, electron_fluid, ion_fluid):
@@ -275,9 +279,10 @@ class HybridPICModel:
         # compute q_ohm for electrons and ions separately
         self.q_ohm_electrons_grid = self.Jer_grid*self.Er_grid + self.Jez_grid*self.Ez_grid
         self.q_ohm_ions_grid = self.Jir_grid*self.Er_grid + self.Jiz_grid*self.Ez_grid
-        #self.q_ohm_ions_grid = ion_fluid.sigma_P_grid*self.Er_grid*self.Er_grid + ion_fluid.sigma_parallel_grid*self.Ez_grid*self.Ez_grid
-        #self.q_ohm_electrons_grid = electron_fluid.sigma_P_grid*self.Er_grid*self.Er_grid + electron_fluid.sigma_parallel_grid*self.Ez_grid*self.Ez_grid
 
+        self.q_ohm_electrons_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+        self.q_ohm_ions_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+        
     # -------- Calculate electrodes currents
     def compute_electrode_currents(self, geom, return_parts=False):
         """

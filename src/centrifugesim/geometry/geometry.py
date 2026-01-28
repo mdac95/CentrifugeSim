@@ -74,7 +74,14 @@ class Geometry:
             (self.r[:, None] >= self.rmin_cathode) & (self.r[:, None] <= self.rmax_cathode) &
             (self.z[None, :] >= self.zmin_cathode) & (self.z[None, :] <= self.zmax_cathode)
         )
-        #self.cathode_mask[int(self.rmax_cathode/self.dr),int(self.zmax_cathode/self.dz)] = np.False_
+        self.i_cath_max = int(self.rmax_cathode/self.dr)
+        self.j_cath_max = int(self.zmax_cathode/self.dz)
+
+        self.i_cathode_r = (self.i_cath_max + np.zeros(self.j_cath_max)).astype(np.int32)
+        self.j_cathode_r = np.arange(self.j_cath_max).astype(np.int32)
+
+        self.i_cathode_z_sheath = np.arange(2/3*self.i_cath_max, self.i_cath_max+1).astype(np.int32)
+        self.j_cathode_z_sheath = (self.j_cath_max + np.zeros(len(self.i_cathode_z_sheath))).astype(np.int32)
 
         # Solve mask: int8 (1 = solve, 0 = masked)
         self.mask = np.ones((self.Nr, self.Nz), dtype=np.int8)
