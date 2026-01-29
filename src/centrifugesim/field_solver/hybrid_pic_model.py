@@ -2,7 +2,7 @@ import numpy as np
 import cupy as cp
 
 from centrifugesim.geometry.geometry import Geometry
-from centrifugesim.field_solver.finite_volume_phi_solver import solve_anisotropic_poisson_FV, solve_anisotropic_poisson_FV_direct, compute_E_and_J
+from centrifugesim.field_solver.finite_volume_phi_solver import solve_anisotropic_poisson_FV_direct, compute_E_and_J
 
 class HybridPICModel:
     def __init__(self, geom:Geometry):
@@ -153,22 +153,8 @@ class HybridPICModel:
         float_outer_wall_top=False):
 
         if(cathode_dirichlet):
-            phi, info = solve_anisotropic_poisson_FV(
-                geom,
-                self.sigma_P_grid,
-                self.sigma_parallel_grid,
-                ne=electron_fluid.ne_grid,
-                pe=electron_fluid.pe_grid,
-                Bz=self.Bz_grid,
-                un_theta=neutral_fluid.un_theta_grid,
-                ne_floor=electron_fluid.ne_floor,
-                Ji_r=Ji_r, Ji_z=Ji_z,
-                cathode_voltage_profile=self.phi_cathode_vec,
-                phi_anode_value=phi_anode_value,
-                phi0=phi0,
-                omega=1.8, tol=tol, max_iter=max_iter,
-                verbose=verbose
-            )
+            # write error message and exit
+            raise ValueError("Cathode Dirichlet BC cannot be used. Not compatible with hollow cathode setup.")
 
         else:
             phi, info = solve_anisotropic_poisson_FV_direct(
@@ -189,7 +175,8 @@ class HybridPICModel:
                     verbose=verbose
             )
 
-        Er, Ez, Jr, Jz, Er_gradpe, Ez_gradpe = compute_E_and_J(phi, geom,
+        Er, Ez, Jr, Jz, Er_gradpe, Ez_gradpe = compute_E_and_J(
+                            phi, geom,
                             self.sigma_P_grid,
                             self.sigma_parallel_grid,
                             ne=electron_fluid.ne_grid,
@@ -198,9 +185,10 @@ class HybridPICModel:
                             un_theta=neutral_fluid.un_theta_grid,
                             ne_floor=electron_fluid.ne_floor,
                             fill_solid_with_nan=False)
+        
+        
 
-        # q_ohm = sigma_P*Er^2 + sigma_parallel*Ez^2
-        q_ohm = self.sigma_P_grid*Er*Er + self.sigma_parallel_grid*Ez*Ez
+        
 
         self.phi_grid = np.copy(phi)
         self.Er_grid = np.copy(Er)
@@ -209,12 +197,19 @@ class HybridPICModel:
         self.Ez_grid_grad_pe = np.copy(Ez_gradpe)
         self.Jr_grid = np.copy(Jr)
         self.Jz_grid = np.copy(Jz)
+
+        # apply cathode BC to Jz and Ez (missing from FV solver post calculation of J and E)
+        rmax_injection = geom.rmax_cathode
+        i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
+        j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
+        self.Jz_grid[i_cathode, j_cathode] = self.Jz_cathode_top_vec[i_cathode]
+        self.Ez_grid[i_cathode, j_cathode] = self.dphi_dz_cathode_top_vec[i_cathode] # remember signs are flipped!
+
+        q_ohm = self.Jr_grid*self.Er_grid + self.Jz_grid*self.Ez_grid
         self.q_ohm_grid = np.copy(q_ohm)
 
         self.Er_grid_d = cp.asarray(self.Er_grid)
         self.Ez_grid_d = cp.asarray(self.Ez_grid)
-
-        self.q_ohm_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
 
         del phi, Er, Ez, Jr, Jz, q_ohm
 
