@@ -530,7 +530,7 @@ class NeutralFluidContainer:
             self.nn_grid,
             self.mass,
             dt,
-            geom.mask
+            self.mask_vel
         )
 
     ###########################################################################################
