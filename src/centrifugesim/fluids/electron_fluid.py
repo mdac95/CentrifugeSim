@@ -420,7 +420,7 @@ class ElectronFluidContainer:
         if q_RF_grid is not None:
             Q_Joule_e_grid += q_RF_grid
 
-        Q_Joule_e_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+        #Q_Joule_e_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
         electron_fluid_helper.update_Te_local_physics(
             self.Te_grid,
             self.ne_grid,
@@ -445,11 +445,8 @@ class ElectronFluidContainer:
         # ----------------------------------------------------------------
         r_coords = geom.r
         
-        # TO DO:
-        # Should update kappa here based on new Te after local physics step
-        # ...
-        # ...
-
+        # Update thermal conductivities
+        self.set_kappa(hybrid_pic)
         
         self.Te_grid = electron_fluid_helper.solve_Te_diffusion_direct(
             self.Te_grid,
