@@ -403,7 +403,8 @@ class ElectronFluidContainer:
                            delta_E_eV_ionization, dt, 
                            chem_T_array, chem_k_array,
                            q_RF_grid=None,
-                           closed_top=False):
+                           closed_top=False,
+                           delta_sheath=1.0):
         """
         Implicit update for Electron Temperature.
         Allows large timesteps by splitting Local Physics and Global Transport.
@@ -466,7 +467,8 @@ class ElectronFluidContainer:
             geom.j_cathode_r,
             geom.i_cathode_z_sheath,
             geom.j_cathode_z_sheath,
-            closed_top=closed_top
+            closed_top=closed_top,
+            delta_sheath=delta_sheath
         )
 
         
