@@ -186,9 +186,8 @@ class HybridPICModel:
                             ne_floor=electron_fluid.ne_floor,
                             fill_solid_with_nan=False)
         
-        
-
-        
+        Jr[0,:] = 0.0
+        Er[0,:] = 0.0
 
         self.phi_grid = np.copy(phi)
         self.Er_grid = np.copy(Er)

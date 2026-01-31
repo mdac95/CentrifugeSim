@@ -437,7 +437,6 @@ class ElectronFluidContainer:
             mn,
             geom.mask,
             self.Te_floor,
-            # Pass arrays to helper
             chem_T_array,
             chem_k_array
         )
