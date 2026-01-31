@@ -403,7 +403,8 @@ class ElectronFluidContainer:
                            delta_E_eV_ionization, dt, 
                            chem_T_array, chem_k_array,
                            q_RF_grid=None,
-                           closed_top=False):
+                           closed_top=False,
+                           delta_sheath=1.0):
         """
         Implicit update for Electron Temperature.
         Allows large timesteps by splitting Local Physics and Global Transport.
@@ -420,7 +421,7 @@ class ElectronFluidContainer:
         if q_RF_grid is not None:
             Q_Joule_e_grid += q_RF_grid
 
-        Q_Joule_e_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+        #Q_Joule_e_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
         electron_fluid_helper.update_Te_local_physics(
             self.Te_grid,
             self.ne_grid,
@@ -436,7 +437,6 @@ class ElectronFluidContainer:
             mn,
             geom.mask,
             self.Te_floor,
-            # Pass arrays to helper
             chem_T_array,
             chem_k_array
         )
@@ -445,11 +445,8 @@ class ElectronFluidContainer:
         # ----------------------------------------------------------------
         r_coords = geom.r
         
-        # TO DO:
-        # Should update kappa here based on new Te after local physics step
-        # ...
-        # ...
-
+        # Update thermal conductivities
+        self.set_kappa(hybrid_pic)
         
         self.Te_grid = electron_fluid_helper.solve_Te_diffusion_direct(
             self.Te_grid,
@@ -469,7 +466,8 @@ class ElectronFluidContainer:
             geom.j_cathode_r,
             geom.i_cathode_z_sheath,
             geom.j_cathode_z_sheath,
-            closed_top=closed_top
+            closed_top=closed_top,
+            delta_sheath=delta_sheath
         )
 
         

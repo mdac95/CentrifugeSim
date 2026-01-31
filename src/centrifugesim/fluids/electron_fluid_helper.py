@@ -903,7 +903,8 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
                              br, bz, mask, dr, dz, r_coords, dt, 
                              mi, closed_top, 
                              i_cathode_r, j_cathode_r,
-                             i_cathode_z, j_cathode_z):
+                             i_cathode_z, j_cathode_z,
+                             delta_sheath=1.0):
     """
     Finite Difference Assembly with closed top and internal cathode sheath BCs (R and Z).
     """
@@ -920,7 +921,6 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
     
     inv_dr2 = 1.0 / (dr * dr)
     inv_dz2 = 1.0 / (dz * dz)
-    delta_sheath = 0.1 
 
     # --- Main Domain Assembly ---
     for i in numba.prange(Nr):
@@ -1274,7 +1274,7 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
                               mi, Te_floor,
                               i_cathode_r, j_cathode_r,
                               i_cathode_z, j_cathode_z,
-                              verbose=False, closed_top=False):
+                              verbose=False, closed_top=False, delta_sheath=1.0):
     """
     Direct Solver for Anisotropic Electron Heat Diffusion.
     Uses Splu (SuperLU) for robust, instant solution.
@@ -1290,6 +1290,7 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
         mi, closed_top,
         i_cathode_r, j_cathode_r,
         i_cathode_z, j_cathode_z,
+        delta_sheath=delta_sheath
     )
     
     # 2. Direct Solve (Scipy/SuperLU)

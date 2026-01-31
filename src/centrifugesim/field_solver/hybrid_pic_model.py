@@ -186,9 +186,8 @@ class HybridPICModel:
                             ne_floor=electron_fluid.ne_floor,
                             fill_solid_with_nan=False)
         
-        
-
-        
+        Jr[0,:] = 0.0
+        Er[0,:] = 0.0
 
         self.phi_grid = np.copy(phi)
         self.Er_grid = np.copy(Er)
@@ -219,8 +218,8 @@ class HybridPICModel:
         self.q_ohm_electrons_grid = self.Jer_grid*self.Er_grid + self.Jez_grid*self.Ez_grid
         self.q_ohm_ions_grid = self.Jir_grid*self.Er_grid + self.Jiz_grid*self.Ez_grid
 
-        self.q_ohm_electrons_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
-        self.q_ohm_ions_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+        #self.q_ohm_electrons_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
+        #self.q_ohm_ions_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
         
     # -------- Calculate electrodes currents
     def compute_electrode_currents(self, geom, return_parts=False):

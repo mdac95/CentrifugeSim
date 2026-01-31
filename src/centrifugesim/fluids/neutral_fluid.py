@@ -270,7 +270,6 @@ class NeutralFluidContainer:
                         self.p_grid, c_iso, self.nn_floor*self.mass,
                         self.mask_rho, self.mask_vel, self.face_r, self.face_z)
             
-            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p()
 
             neutral_fluid_helper.step_advection_energy(r, dr, dz, dt_sub,
@@ -279,7 +278,6 @@ class NeutralFluidContainer:
                         self.fluid, self.face_r, self.face_z)
             
             apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
-            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p() 
 
             # --- RK Stage 2 ---
@@ -296,7 +294,6 @@ class NeutralFluidContainer:
                         self.fluid, self.face_r, self.face_z)
             
             apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
-            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p()
 
             # --- Average (SSP-RK2) ---
@@ -307,7 +304,6 @@ class NeutralFluidContainer:
             self.T_n_grid[:]       = 0.5 * (T0   + self.T_n_grid)
             
             apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
-            #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
             self.update_p()
 
         # Update nn before collisions
@@ -323,7 +319,6 @@ class NeutralFluidContainer:
              self.update_temperature_collisions_implicit(ion_fluid, electron_fluid, geom, dt)
 
         apply_bc_vel(closed_top=closed_top); apply_bc_temp(closed_top=closed_top)
-        #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
         self.update_p()
         self.update_nn()
 
@@ -337,16 +332,23 @@ class NeutralFluidContainer:
         self.kappa_grid[:,:] = kappa_val
 
         # Viscous Heating (EXPLICIT)
-        neutral_fluid_helper.add_viscous_heating(
-            self.T_n_grid, self.rho_grid,
-            self.un_r_grid, self.un_theta_grid, self.un_z_grid,
-            self.mu_grid, self.c_v,
-            dr, dz, dt, 
-            self.fluid, self.face_r, self.face_z
-        )
+        visc_safety_factor = 0.5
+        dz_sq = geom.dz**2
+        max_nu = np.max(self.mu_grid[geom.mask==1] / (self.rho_grid[geom.mask==1]))
+        dt_heat_limit = visc_safety_factor * dz_sq / (max_nu)
+        n_heat_steps = int(np.ceil(dt / dt_heat_limit))
+        dt_heat_sub = dt / n_heat_steps
+        # Sub-cycle
+        for _ in range(n_heat_steps):
+            neutral_fluid_helper.add_viscous_heating(
+                self.T_n_grid, self.rho_grid,
+                self.un_r_grid, self.un_theta_grid, self.un_z_grid,
+                self.mu_grid, self.c_v,
+                dr, dz, dt_heat_sub, # Use substep dt
+                self.fluid, self.face_r, self.face_z
+            )
+            apply_bc_temp(closed_top=closed_top)
 
-        apply_bc_temp(closed_top=closed_top)
-        #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
         self.update_p()
         self.update_nn()
 
@@ -361,12 +363,11 @@ class NeutralFluidContainer:
         neutral_fluid_helper.solve_implicit_heat_sor(
             self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
             dt, dr, dz, self.T_wall, self.geom.temperature_cathode, self.geom.i_cath_max, self.geom.j_cath_max,
-            max_iter=500, omega=1.8,
+            max_iter=250, omega=1.8,
             closed_top=closed_top
         )
 
         apply_bc_temp(closed_top=closed_top)
-        #self.enforce_wall_dpdr0_mass_conserving_weighted(n_band)
         self.update_p()
         self.update_nn()
 
