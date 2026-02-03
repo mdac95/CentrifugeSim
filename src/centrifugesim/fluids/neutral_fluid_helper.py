@@ -21,9 +21,16 @@ def dpdr_masked(p, dr, i, k, face_r, mask_vel):
     Nr = p.shape[0]
 
     # --- 1. Domain Boundary Protection (Right Wall Nr-1) ---
+    #if i == Nr - 2:
+    #    if face_r[i, k] == 1: return (p[i, k] - p[i-1, k]) / dr
+    #    else: return 0.0
+    if i == Nr - 1:
+        return 0.0
     if i == Nr - 2:
-        if face_r[i, k] == 1: return (p[i, k] - p[i-1, k]) / dr
-        else: return 0.0
+        return (p[i+1, k] - p[i-1, k]) / (2*dr)
+    if i == Nr - 3:
+        if face_r[i-1, k] == 1 and face_r[i-2, k] == 1:
+             return (3*p[i, k] - 4*p[i-1, k] + p[i-2, k]) / (2*dr)
 
     # --- 2. Check for Internal Solids (Shielding) ---
     if mask_vel is not None:
@@ -85,13 +92,29 @@ def dpdr_masked(p, dr, i, k, face_r, mask_vel):
 @njit
 def dpdz_masked(p, dz, i, k, face_z, mask_vel):
     Nz = p.shape[1]
-    
-    # --- 1. Domain Boundary Protection (Bottom Wall k=1) ---
-    if k == 1:
-        if face_z[i, k+1] == 1: return (p[i, k+1] - p[i, k]) / dz
-        else: return 0.0
 
-    # --- 2. Check for Internal Solids ---
+    # --- 1. Bottom Wall (z_min) ---
+    if k == 0:
+        return 0.0
+    if k == 1:
+        return (p[i, k+1] - p[i, k-1]) / (2*dz)
+    if k == 2:
+        if face_z[i, k+1] == 1 and face_z[i, k+2] == 1:
+            return (-3*p[i, k] + 4*p[i, k+1] - p[i, k+2]) / (2*dz)
+    if k==Nz-1:
+        return 0.0
+    
+    # --- 2. Top Wall (z_max) ---
+    if k == Nz - 1:
+        return 0.0
+    if k == Nz - 2:
+        return (p[i, k+1] - p[i, k-1]) / (2*dz)
+    if k == Nz - 3:
+        if face_z[i, k] == 1 and face_z[i, k-1] == 1:
+            return (3*p[i, k] - 4*p[i, k-1] + p[i, k-2]) / (2*dz)
+    
+
+    # --- 3. Check for Internal Solids ---
     if mask_vel is not None:
         
         # ==========================================================
@@ -126,7 +149,7 @@ def dpdz_masked(p, dz, i, k, face_z, mask_vel):
             if k <= Nz - 3 and mask_vel[i, k+2] == 1:
                 return (-3*p[i, k] + 4*p[i, k+1] - p[i, k+2]) / (2*dz)
 
-    # --- 3. Standard Central Difference ---
+    # --- 4. Standard Central Difference ---
     up_open = (face_z[i, k+1] == 1)
     if mask_vel is not None and k < Nz-1 and mask_vel[i, k+1] == 0: up_open = False
     
@@ -243,6 +266,8 @@ def rusanov_div_scalar_masked(q, ur, uz, r, dr, dz, a_r, a_z, out,
             flux = 0.5*(fL + fR) - 0.5*a*(qR - qL)
             if face_r is not None:
                 flux *= face_r[i,k]    # close face if 0
+            if i == Nr-1:
+                flux = 0.0
             Fr[i,k] = flux
 
     # axial faces (1..Nz-1)
@@ -258,6 +283,10 @@ def rusanov_div_scalar_masked(q, ur, uz, r, dr, dz, a_r, a_z, out,
             flux = 0.5*(fL + fR) - 0.5*a*(qR - qL)
             if face_z is not None:
                 flux *= face_z[i,k]
+            if k == 1:
+                flux=0.0
+            if k == Nz-1: # check
+                flux=0.0
             Fz[i,k] = flux
 
     # Axisymmetric divergence on FULL domain (0..Nr-1, 0..Nz-1)
@@ -723,7 +752,7 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
 
                 Tn[i, j] = T_new
 
-        if max_diff < 1e-4:
+        if max_diff < 1e-5:
             break
 
 @njit(cache=True)
@@ -731,7 +760,6 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,
                                  dt, dr, dz, max_iter=20, omega=1.4, closed_top=False):
     """
     Implicit Viscosity for AZIMUTHAL velocity v_theta.
-    Now accepts explicit source_term for grad(mu) corrections.
     """
     Nr, Nz = un_theta.shape
     inv_dr2 = 1.0 / (dr * dr)
@@ -744,7 +772,6 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,
         
         for i in range(1, Nr-1):
             r = i * dr
-
             c_east_base = ((r + 0.5*dr) / r) * inv_dr2
             c_west_base = ((r - 0.5*dr) / r) * inv_dr2
             c_self_geo = 1.0 / (r * r)
@@ -753,48 +780,48 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,
 
             for j in range(1, Nz-1): 
                 if mask[i, j] == 1:
-                    
-                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 2.0 * c_east_base
-                    else:                 val_E = un_theta[i+1, j]; c_east = c_east_base
-
-                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 2.0 * c_west_base
-                    else:                 val_W = un_theta[i-1, j]; c_west = c_west_base
-                    
-                    if j == Nz - 2:
-                        if mask[i, j+1] == 0: 
-                            val_N = 0.0; c_north = 2.0 * c_north_base
-                        elif closed_top:
-                            val_N = 0.0; c_north = 2.0 * c_north_base
-                        else:
-                            val_N = 0.0; c_north = 0.0
-                    elif mask[i, j+1] == 0:   val_N = 0.0; c_north = 2.0 * c_north_base
-                    else:                     val_N = un_theta[i, j+1]; c_north = c_north_base
-
-                    if j == 1:
-                        val_S = 0.0; c_south = 2.0 * c_south_base
-                    elif mask[i, j-1] == 0:
-                        val_S = 0.0; c_south = 2.0 * c_south_base
-                    else:
-                        val_S = un_theta[i, j-1]; c_south = c_south_base
-
-                    # --- Matrix & RHS ---
                     mu_val = mu_grid[i, j]
                     rho = max(nn[i, j], 1e12) * mn
                     A_time = rho / dt
+
+                    # --- EAST / WEST ---
+                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 1.0 * c_east_base
+                    else:                 val_E = un_theta[i+1, j]; c_east = c_east_base
+
+                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 1.0 * c_west_base
+                    else:                 val_W = un_theta[i-1, j]; c_west = c_west_base
                     
+                    # --- NORTH (Top Wall) ---
+                    if j == Nz - 2:
+                        if mask[i, j+1] == 0: 
+                            val_N = 0.0; c_north = 1.0 * c_north_base
+                        elif closed_top:
+                            val_N = 0.0; c_north = 1.0 * c_north_base # No-Slip
+                        else:
+                            val_N = 0.0; c_north = 0.0 # Slip (Neumann)
+                    elif mask[i, j+1] == 0:   val_N = 0.0; c_north = 1.0 * c_north_base
+                    else:                     val_N = un_theta[i, j+1]; c_north = c_north_base
+
+                    # --- SOUTH (Bottom Wall) ---
+                    if j == 1:
+                        val_S = 0.0; c_south = 1.0 * c_south_base
+                    elif mask[i, j-1] == 0:
+                        val_S = 0.0; c_south = 1.0 * c_south_base
+                    else:
+                        val_S = un_theta[i, j-1]; c_south = c_south_base
+
+                    # --- Solve ---
                     A_P = A_time + mu_val * (c_east + c_west + c_north + c_south + c_self_geo)
-                    
-                    # --- UPDATED RHS: Add source_term[i,j] ---
                     RHS = (A_time * u_old[i, j]) + \
                           mu_val * (c_east * val_E + c_west * val_W + c_north * val_N + c_south * val_S) + \
-                          source_term[i, j] # <--- ADDED HERE
+                          source_term[i, j]
                     
                     v_new = (1.0 - omega)*un_theta[i, j] + omega*(RHS / A_P)
                     diff = abs(v_new - un_theta[i, j])
                     if diff > max_diff: max_diff = diff
                     un_theta[i, j] = v_new
                     
-        if max_diff < 1e-4: break
+        if max_diff < 1e-5: break
 
 @njit(cache=True)
 def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid, source_term, 
@@ -814,7 +841,7 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid, source_term,
 
     for it in range(max_iter):
         max_diff = 0.0
-        for i in range(1, Nr): 
+        for i in range(1, Nr-1): 
             r = i * dr
             if r <= 0.0: continue
 
@@ -834,29 +861,37 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid, source_term,
                 rho    = nn[i, j] * mn
                 A_time = rho / dt
 
-                # --- EAST / WEST ---
-                if i == Nr - 1:           val_E = 0.0; c_east = 2.0 * c_east_base
-                elif mask[i+1, j] == 0:   val_E = 0.0; c_east = 2.0 * c_east_base
-                else:                     val_E = ur[i+1, j]; c_east = c_east_base
+                # --- EAST / WEST (Radial Boundaries) ---
+                if i == Nr - 1:           
+                    val_E = 0.0; c_east = 1.0 * c_east_base
+                elif mask[i+1, j] == 0:   
+                    val_E = 0.0; c_east = 1.0 * c_east_base
+                else:                     
+                    val_E = ur[i+1, j]; c_east = c_east_base
 
-                if mask[i-1, j] == 0:     val_W = 0.0; c_west = 2.0 * c_west_base
-                else:                     val_W = ur[i-1, j]; c_west = c_west_base
+                if mask[i-1, j] == 0:     
+                    val_W = 0.0; c_west = 1.0 * c_west_base
+                else:                     
+                    val_W = ur[i-1, j]; c_west = c_west_base
 
-                # --- NORTH / SOUTH ---
+                # --- NORTH / SOUTH (Axial Boundaries) ---
                 if j == Nz - 2:
-                    if mask[i, j+1] == 0: 
-                        val_N = 0.0; c_north = 2.0 * c_north_base
-                    elif closed_top:
-                        val_N = 0.0; c_north = 2.0 * c_north_base
+                    if closed_top:
+                        c_north = 1.0 * c_north_base
+                        val_N = 0.0
+                    elif mask[i, j+1] == 0: 
+                        val_N = 0.0; c_north = 1.0 * c_north_base
                     else:
                         val_N = 0.0; c_north = 0.0
-                elif mask[i, j+1] == 0:   val_N = 0.0; c_north = 2.0 * c_north_base
-                else:                     val_N = ur[i, j+1]; c_north = c_north_base
+                elif mask[i, j+1] == 0:   
+                    val_N = 0.0; c_north = 1.0 * c_north_base
+                else:                     
+                    val_N = ur[i, j+1]; c_north = c_north_base
 
-                if j == 1: # Fix for j=1
-                    val_S = 0.0; c_south = 2.0 * c_south_base
+                if j == 1: # Bottom Wall
+                    val_S = 0.0; c_south = 1.0 * c_south_base
                 elif mask[i, j-1] == 0:
-                    val_S = 0.0; c_south = 2.0 * c_south_base
+                    val_S = 0.0; c_south = 1.0 * c_south_base
                 else:
                     val_S = ur[i, j-1]; c_south = c_south_base
 
@@ -874,14 +909,16 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid, source_term,
                 if diff > max_diff: max_diff = diff
                 ur[i, j] = u_new
 
-        if max_diff < 1e-4: break
+        if max_diff < 1e-5: break
 
 @njit(cache=True)
 def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid, source_term,
                                    dt, dr, dz, max_iter=20, omega=1.4):
     """
-    Implicit viscosity for AXIAL velocity u_z with Compressibility.
-    Longitudinal (z) terms boosted by 4/3. Cross-term passed as source.
+    Implicit viscosity for AXIAL velocity u_z.
+    Longitudinal (z) terms boosted by 4/3.
+    Boundary Factors fixed to 1.0 for Nodal Grid.
+    Top Wall (zmax) is ALWAYS Dirichlet (Impermeable), even if open top.
     """
     Nr, Nz = uz.shape
     inv_dr2 = 1.0 / (dr * dr)
@@ -891,6 +928,7 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid, source_term,
     LONG_FACTOR = 4.0 / 3.0
 
     for k in range(max_iter):
+        # Axis Symmetry: derivative is 0, so uz[0] = uz[1]
         for j_sym in range(Nz):
             if mask[0, j_sym] == 1: uz[0, j_sym] = uz[1, j_sym]
 
@@ -908,32 +946,36 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid, source_term,
             
             for j in range(1, Nz-1):
                 if mask[i, j] == 1:
+                    mu_val = mu_grid[i, j]
+                    rho = max(nn[i, j], 1e12) * mn
+                    A_time = rho / dt
+
                     # --- EAST / WEST ---
-                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 2.0 * c_east_base
+                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 1.0 * c_east_base
                     else:                 val_E = uz[i+1, j]; c_east = c_east_base
 
-                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 2.0 * c_west_base
+                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 1.0 * c_west_base
                     else:                 val_W = uz[i-1, j]; c_west = c_west_base
 
-                    # --- NORTH / SOUTH ---
+                    # --- NORTH (Top Wall) ---
+                    # Crucial Difference: uz is ALWAYS 0 at the top (Impermeable)
                     if j == Nz - 2:
-                        if mask[i, j+1] == 0: val_N = 0.0; c_north = 2.0 * c_north_base
-                        else:                 val_N = 0.0; c_north = 0.0
-                    elif mask[i, j+1] == 0:   val_N = 0.0; c_north = 2.0 * c_north_base
-                    else:                     val_N = uz[i, j+1]; c_north = c_north_base
+                        # Regardless of closed_top, u_z must be 0 at the boundary
+                        val_N = 0.0; c_north = 1.0 * c_north_base
+                    elif mask[i, j+1] == 0:   
+                        val_N = 0.0; c_north = 1.0 * c_north_base
+                    else:                     
+                        val_N = uz[i, j+1]; c_north = c_north_base
 
+                    # --- SOUTH (Bottom Wall) ---
                     if j == 1:
-                        val_S = 0.0; c_south = 2.0 * c_south_base
+                        val_S = 0.0; c_south = 1.0 * c_south_base
                     elif mask[i, j-1] == 0:
-                        val_S = 0.0; c_south = 2.0 * c_south_base
+                        val_S = 0.0; c_south = 1.0 * c_south_base
                     else:
                         val_S = uz[i, j-1]; c_south = c_south_base
                         
                     # --- Solve ---
-                    mu_val = mu_grid[i, j]
-                    rho = max(nn[i, j], 1e12) * mn
-                    A_time = rho / dt
-                    
                     A_P = A_time + mu_val * (c_east + c_west + c_north + c_south)
                     RHS = (A_time * uz_old[i, j]) + \
                           mu_val * (c_east * val_E + c_west * val_W + c_north * val_N + c_south * val_S) + \
@@ -944,7 +986,7 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid, source_term,
                     if diff > max_diff: max_diff = diff
                     uz[i, j] = u_new
                     
-        if max_diff < 1e-4: break
+        if max_diff < 1e-5: break
         
 @njit(parallel=True)
 def mom_rhs_inviscid(r, rho, ur, ut, uz, p,
@@ -1271,233 +1313,6 @@ def add_ion_neutral_frictional_heating(Tn, un_t, vi_t,
                     # Temperature Increment
                     dT = dt * Q_fric / (rho_n * Cv)                        
                     Tn[i, j] += dT
-
-###########################################################################################################
-############################################## TO TEST ####################################################
-###########################################################################################################
-
-# Stable, works well, problem on two last nodes (smaller than Nr-3) but trend up to Nr-3 is good and smooth.
-@njit(cache=True)
-def enforce_wall_dpdr0_mass_conserving_smooth_fast_weighted(
-    rho_grid, nn_grid, fluid, V, T_n_grid, 
-    T_wall, mass, nn_floor, n_band
-):
-    """
-    Numba-optimized implementation of the smooth mass-conserving wall BC.
-    
-    Arguments:
-        rho_grid, nn_grid, fluid, V, T_n_grid: 2D arrays (Nr, Nz)
-        T_wall, mass, nn_floor: scalars
-        n_band: integer
-    """
-    Nr, Nz = rho_grid.shape
-    rho_floor_val = nn_floor * mass
-
-    iW = Nr - 1          # Wall node
-    iI = Nr - 2          # Last interior node (neighbor)
-    i0 = max(0, Nr - 1 - n_band)   # Start of compensation band
-
-    # Band size check
-    band_len = iW - i0
-    if band_len <= 0:
-        return
-
-    # --- Pre-calculate weights (Quadratic ramp 0 -> 1) ---
-    weights = np.empty(band_len, dtype=np.float64)
-    if band_len == 1:
-        weights[0] = 0.0 # Edge case: n_band=1 prevents smoothing
-    else:
-        for j in range(band_len):
-            # Equivalent to np.linspace(0, 1, band_len)**2
-            t = j / (band_len - 1)
-            weights[j] = t * t
-
-    # --- Loop over axial columns ---
-    for k in range(Nz):
-        # Only enforce if wall and neighbor are fluid
-        if fluid[iW, k] != 1 or fluid[iI, k] != 1:
-            continue
-        
-        T_neighbor = T_n_grid[iI, k]
-        # Safety check for temperature
-        if T_neighbor <= 1e-9:
-            continue
-
-        # --- (1) Calculate Total Mass Budget (M0) ---
-        M0 = 0.0
-        
-        # Sum mass in the interior band
-        for j in range(band_len):
-            i = i0 + j
-            if fluid[i, k] == 1:
-                M0 += rho_grid[i, k] * V[i, k]
-        
-        # Add mass in the wall cell
-        M0 += rho_grid[iW, k] * V[iW, k]
-
-        # --- (2) Solve for correction strength 'delta' ---
-        # Equation: M0 = term_A + delta * term_B
-        
-        term_A = 0.0
-        term_B = 0.0
-        temp_ratio = T_neighbor / T_wall
-        
-        # 2a. Interior Band Contributions
-        for j in range(band_len):
-            i = i0 + j
-            if fluid[i, k] == 1:
-                mass_i = rho_grid[i, k] * V[i, k]
-                w_i = weights[j]
-                
-                term_A += mass_i
-                term_B += mass_i * w_i
-        
-        # 2b. Wall Contribution
-        # The wall is enslaved to the neighbor (iI). 
-        # Since iI is the last node (j=band_len-1), its weight is 1.0.
-        # So rho_neighbor scales by (1 + delta).
-        
-        rho_neighbor_old = rho_grid[iI, k]
-        vol_wall = V[iW, k]
-        
-        wall_base_mass = rho_neighbor_old * temp_ratio * vol_wall
-        
-        term_A += wall_base_mass
-        term_B += wall_base_mass # weight is 1.0, so coefficient is just mass
-        
-        # Avoid division by zero
-        if term_B <= 1e-14:
-            continue
-            
-        delta = (M0 - term_A) / term_B
-        
-        # Clamp delta to prevent negative density
-        if delta < -0.99:
-            delta = -0.99
-
-        # --- (3) Apply Updates ---
-        
-        # Update Interior Band
-        for j in range(band_len):
-            i = i0 + j
-            if fluid[i, k] == 1:
-                w = weights[j]
-                scale = 1.0 + delta * w
-                
-                # Update Rho
-                new_rho = max(rho_grid[i, k] * scale, rho_floor_val)
-                rho_grid[i, k] = new_rho
-                
-                # Update NN (Inline update is faster than full array sweep)
-                nn_grid[i, k] = new_rho / mass
-        
-        # Update Wall (Based on NEW neighbor density)
-        rho_neighbor_new = rho_grid[iI, k]
-        new_rho_wall = max(rho_neighbor_new * temp_ratio, rho_floor_val)
-        
-        rho_grid[iW, k] = new_rho_wall
-        nn_grid[iW, k] = new_rho_wall / mass
-
-
-@njit(cache=True)
-def enforce_wall_dpdr0_mass_conserving_smooth_fast(
-    rho_grid, nn_grid, fluid, V, T_n_grid, 
-    Tw, mass, nn_floor, n_band, use_uniform_weights
-):
-    Nr, Nz = rho_grid.shape
-    rho_floor_val = nn_floor * mass
-
-    iW = Nr - 1          # Wall node
-    iI = Nr - 2          # Neighbor node
-    i0 = max(0, Nr - 1 - n_band)   # Start of compensation band
-
-    band_len = iW - i0
-    if band_len <= 0:
-        return
-
-    # --- Pre-calculate weights ---
-    weights = np.zeros(band_len, dtype=np.float64)
-    
-    if use_uniform_weights:
-        # UNIFORM: Best for Global Band. Preserves profile shape exactly.
-        for j in range(band_len):
-            weights[j] = 1.0
-    else:
-        # SMOOTH RAMP: Best for Local Band. Hides the "seam" at i0.
-        if band_len > 1:
-            for j in range(band_len):
-                t = j / (band_len - 1)
-                weights[j] = t * t
-        else:
-            weights[0] = 0.0
-
-    # --- Loop over axial columns ---
-    for k in range(Nz):
-        if fluid[iW, k] != 1 or fluid[iI, k] != 1:
-            continue
-        
-        T_neighbor = T_n_grid[iI, k]
-        if T_neighbor <= 1e-9:
-            continue
-
-        # --- (1) Calculate Mass Budget (M0) ---
-        M0 = 0.0
-        # Interior Band
-        for j in range(band_len):
-            i = i0 + j
-            if fluid[i, k] == 1:
-                M0 += rho_grid[i, k] * V[i, k]
-        # Wall
-        M0 += rho_grid[iW, k] * V[iW, k]
-
-        # --- (2) Solve for delta ---
-        term_A = 0.0
-        term_B = 0.0
-        temp_ratio = T_neighbor / Tw
-        
-        # Interior Contributions
-        for j in range(band_len):
-            i = i0 + j
-            if fluid[i, k] == 1:
-                mass_i = rho_grid[i, k] * V[i, k]
-                w_i = weights[j]
-                term_A += mass_i
-                term_B += mass_i * w_i
-        
-        # Wall Contribution (Enslaved to Neighbor)
-        rho_neighbor_old = rho_grid[iI, k]
-        vol_wall = V[iW, k]
-        
-        # Note: If Uniform, neighbor weight is 1.0. If Smooth, it's also 1.0.
-        # So math is identical here.
-        wall_base_mass = rho_neighbor_old * temp_ratio * vol_wall
-        
-        term_A += wall_base_mass
-        term_B += wall_base_mass 
-        
-        if term_B <= 1e-14:
-            continue
-            
-        delta = (M0 - term_A) / term_B
-        if delta < -0.99: delta = -0.99
-
-        # --- (3) Apply Updates ---
-        for j in range(band_len):
-            i = i0 + j
-            if fluid[i, k] == 1:
-                w = weights[j]
-                scale = 1.0 + delta * w
-                
-                new_rho = max(rho_grid[i, k] * scale, rho_floor_val)
-                rho_grid[i, k] = new_rho
-                nn_grid[i, k] = new_rho / mass
-        
-        # Update Wall
-        rho_neighbor_new = rho_grid[iI, k]
-        new_rho_wall = max(rho_neighbor_new * temp_ratio, rho_floor_val)
-        rho_grid[iW, k] = new_rho_wall
-        nn_grid[iW, k] = new_rho_wall / mass
-
 
 ###########################################################################################################
 ########################################## Old (Explicit) #################################################
