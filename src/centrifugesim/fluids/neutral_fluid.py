@@ -114,6 +114,9 @@ class NeutralFluidContainer:
 
     def update_p(self):
         self.p_grid[self.fluid==1] = self.rho_grid[self.fluid==1] * self.Rgas_over_m * self.T_n_grid[self.fluid==1]
+        self.p_grid[:,-1] = self.p_grid[:,-3]
+        self.p_grid[:, 0] = self.p_grid[:, 2]
+        self.p_grid[-1, :] = self.p_grid[-3, :]
 
     def compute_sound_speed(self, Tfield):
         return np.sqrt(self.gamma * self.Rgas_over_m * Tfield)
@@ -225,7 +228,7 @@ class NeutralFluidContainer:
     ### methods for Implicit navier stokes (no test)
     ###########################################################################################
     def advance_semi_implicit(self, geom, dt, c_iso, apply_bc_vel, apply_bc_temp, 
-                              ion_fluid=None, electron_fluid=None, n_band=4, closed_top=False):
+                              ion_fluid=None, electron_fluid=None, closed_top=False, max_iter_sor=750):
         """
         Advances the neutral fluid using Operator Splitting with HYDRO SUB-CYCLING.
         1. Sub-cycled Explicit Advection (Hydro + Energy) to handle acoustic CFL.
@@ -308,6 +311,12 @@ class NeutralFluidContainer:
 
         # Update nn before collisions
         self.update_nn()
+        self.nn_grid[:,0] = self.nn_grid[:,1]
+        self.nn_grid[:,-1] = self.nn_grid[:,-2]
+        self.nn_grid[-1,:] = self.nn_grid[-2,:]
+        self.rho_grid[:,0] = self.rho_grid[:,1]
+        self.rho_grid[:,-1] = self.rho_grid[:,-2]
+        self.rho_grid[-1,:] = self.rho_grid[-2,:]
 
         # ==========================================================
         # STEP B: IMPLICIT COLLISIONS (Source) - ONCE PER GLOBAL STEP
@@ -363,7 +372,7 @@ class NeutralFluidContainer:
         neutral_fluid_helper.solve_implicit_heat_sor(
             self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
             dt, dr, dz, self.T_wall, self.geom.temperature_cathode, self.geom.i_cath_max, self.geom.j_cath_max,
-            max_iter=250, omega=1.8,
+            max_iter=max_iter_sor, omega=1.8,
             closed_top=closed_top
         )
 
@@ -408,87 +417,22 @@ class NeutralFluidContainer:
         # Solve Azimuthal 
         neutral_fluid_helper.solve_implicit_viscosity_sor(
             self.un_theta_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, St,
-            dt, dr, dz, max_iter=250, omega=1.8, closed_top=closed_top
+            dt, dr, dz, max_iter=max_iter_sor, omega=1.8, closed_top=closed_top
         )
 
         # Solve Radial (Pass Sr)
         neutral_fluid_helper.solve_implicit_viscosity_r_sor(
             self.un_r_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, Sr,
-            dt, dr, dz, max_iter=250, omega=1.8, closed_top=closed_top
+            dt, dr, dz, max_iter=max_iter_sor, omega=1.8, closed_top=closed_top
         )
         
         # Solve Axial (Pass Sz)
         neutral_fluid_helper.solve_implicit_viscosity_z_sor(
             self.un_z_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, Sz,
-            dt, dr, dz, max_iter=250, omega=1.8
+            dt, dr, dz, max_iter=max_iter_sor, omega=1.8
         )
 
         apply_bc_vel(closed_top=closed_top)
-
-
-    def enforce_wall_dpdr0_mass_conserving_weighted(self, n_band=4):
-        """
-        Enforce dp/dr = 0 at the outer wall node i=Nr-1 by setting p[-1,k]=p[-2,k]
-        through rho[-1,k], while conserving mass locally in a radial band.
-
-        Scaling model:
-        rho_new[i] = rho_old[i] * (1 + delta * weight[i])
-        
-        Where weight[i] increases linearly from 0 at i0 to 1 at i_neighbor.
-        We solve for scalar 'delta' to ensure exact mass conservation.
-        """
-        neutral_fluid_helper.enforce_wall_dpdr0_mass_conserving_smooth_fast_weighted(
-            self.rho_grid,
-            self.nn_grid,
-            self.fluid,
-            self.geom.volume_field,
-            self.T_n_grid,
-            self.T_wall,
-            self.mass,
-            self.nn_floor,
-            int(n_band)
-        )
-
-
-    def enforce_wall_dpdr0_mass_conserving_smooth(self, n_band=None):
-        """
-        Enforce dp/dr = 0 at the outer wall node i=Nr-1 by setting p[-1,k]=p[-2,k]
-        through rho[-1,k], while conserving mass locally in a radial band.
-
-        IMPROVEMENT: Uses a weighted distribution to eliminate the discontinuity 
-        at the start of the band (i0).
-        
-        Scaling model:
-        rho_new[i] = rho_old[i] * (1 + delta * weight[i])
-        
-        Where weight[i] increases smoothly from 0 at i0 to 1 at i_neighbor.
-        We solve for scalar 'delta' to ensure exact mass conservation.
-        """
-        Nr = self.rho_grid.shape[0]
-        
-        if n_band is None:
-            n_band = 4
-        
-        # AUTO-SWITCH LOGIC:
-        # If n_band covers most of the radius, use Uniform Weights.
-        # This prevents the "pressure dip" at the wall caused by weighted taxes.
-        use_uniform_weights = False
-        if n_band >= Nr // 2:
-            use_uniform_weights = True
-
-        neutral_fluid_helper.enforce_wall_dpdr0_mass_conserving_smooth_fast(
-            self.rho_grid,
-            self.nn_grid,
-            self.fluid,
-            self.geom.volume_field,
-            self.T_n_grid,
-            self.T_wall,
-            self.mass,
-            self.nn_floor,
-            int(n_band),
-            bool(use_uniform_weights) 
-        )
-
         
     ###########################################################################################
     ### Methods used when fluid ions are on (not kinetic ions)
