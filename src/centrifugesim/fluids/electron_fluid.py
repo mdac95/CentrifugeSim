@@ -227,8 +227,6 @@ class ElectronFluidContainer:
             # Single step with dt
             _advance(dt)
 
-        # self.Te_grid_prev = Te_grid.copy() # saving for ion T relaxation
-
         # --- Collision energy exchange term uses the full dt (outside of sub-steps) ---
         self.compute_elastic_collisions_term(geom, neutral_fluid, particle_container, Ts_host, dt)
 
@@ -330,7 +328,7 @@ class ElectronFluidContainer:
         )
         
         # =========================================================
-        # Stability Fix: Log-Space Clamping & Under-Relaxation
+        # Stability: Log-Space Clamping & Under-Relaxation
         # =========================================================
         
         # Safety floor for logs
@@ -343,7 +341,6 @@ class ElectronFluidContainer:
         # Calculate desired change
         diff = log_target - log_old
         
-        # CLAMP the change (The Fix!)
         # MAX_LOG_STEP = 0.5 means max change is 10^0.5 ~= 3.16x per timestep.
         # This prevents the 10^8 jumps.
         MAX_LOG_STEP = 0.5 
@@ -358,45 +355,6 @@ class ElectronFluidContainer:
         
         # Finalize
         self.ne_grid = 10**(log_final)
-
-    def update_density_steady_state(self, geom, ion_fluid, nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid):
-        """
-        Forces ne to the local steady-state equilibrium based on current Te and rates.
-        Solves: Production = Loss (Algebraic).
-        Useful for initializing the plasma or debugging transport limits.
-        """
-        
-        # 1. Geometric Factors for Ambipolar Diffusion
-        R_max = geom.r.max()
-        L_z = geom.z.max() - geom.z.min()
-        
-        inv_Lambda_r_sq = (2.405 / R_max)**2
-        inv_Lambda_z_sq = (np.pi / (2.0 * L_z))**2
-        
-        # 2. Compute Effective Diffusive Loss Rate [1/s]
-        nu_diff_grid = electron_fluid_helper.compute_ambipolar_loss_rate_anisotropic(
-            self.Te_grid,
-            ion_fluid.Ti_grid,
-            ion_fluid.nu_i_grid,
-            self.beta_e_grid,
-            ion_fluid.beta_i_grid,
-            ion_fluid.m_i,
-            constants.kb,
-            inv_Lambda_z_sq,
-            inv_Lambda_r_sq
-        )
-        
-        # 3. Call the Steady-State Kernel
-        # We write directly to self.ne_grid
-        electron_fluid_helper.compute_steady_state_ne_kernel(
-            self.ne_grid,        # Output
-            nu_iz_grid,          # Source [1/s]
-            nu_diff_grid,        # Diffusive Loss [1/s]
-            nu_RR_recomb_grid,   # Linear Recomb Loss [1/s]
-            beta_rec_grid,       # Quadratic Recomb Coeff [m^3/s]
-            geom.mask,
-            self.ne_floor
-        )
 
     def update_Te_implicit(self, geom, hybrid_pic, neutral_fluid, ion_fluid, 
                            Q_Joule_e_grid, 

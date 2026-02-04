@@ -8,7 +8,7 @@ from centrifugesim import constants
 class NeutralFluidContainer:
     """
     """
-    def __init__(self, geom:Geometry, species_list, nn_floor, mass, name, kind, Tn0=0.0, alpha=1.0):
+    def __init__(self, geom:Geometry, species_list, nn_floor, mass, name, kind, Tn0=0.0, alpha=1.0, min_T_mu_calc=2000.0):
 
         self.name = name
 
@@ -21,6 +21,7 @@ class NeutralFluidContainer:
         self.mass = mass
 
         self.alpha = alpha # Accommodation coefficient for wall BCs (Temperature)
+        self.min_T_mu_calc = min_T_mu_calc # minimum T used to calculate viscosity
 
         self.kind = kind
         if(self.kind=='monatomic'):
@@ -171,7 +172,7 @@ class NeutralFluidContainer:
 
     # --------------------------- Boundary conditions -------------------------
 
-    def apply_bc_isothermal(self, closed_top=False):
+    def apply_bc_isothermal_prev(self, closed_top=False):
         Nr, Nz = self.rho_grid.shape
 
         # --- Axis r = 0 (i = 0): regularity ---
@@ -204,6 +205,37 @@ class NeutralFluidContainer:
         self.un_theta_grid[self.i_bc_list, self.j_bc_list] = 0.0
         self.un_z_grid[self.i_bc_list, self.j_bc_list] = 0.0
 
+    def apply_bc_isothermal(self, closed_top=False):
+
+        # --- Axis r = 0 (i = 0): regularity ---
+        self.un_r_grid[0,:]      = 0.0                 
+        self.un_theta_grid[0,:]  = 0.0                 
+        self.un_z_grid[0,:]      = self.un_z_grid[1,:] # Neumann (d/dr = 0)
+
+        # --- Radial wall r = R (i = Nr-1): No-Slip + Impermeable ---
+        self.un_r_grid[-1,:]     = -self.un_r_grid[-2,:]      # Impermeable
+        self.un_theta_grid[-1,:] = -self.un_theta_grid[-2,:]  # No-Slip
+        self.un_z_grid[-1,:]     = -self.un_z_grid[-2,:]      # No-Slip
+
+        # --- Bottom plate z = 0 (k = 0): No-Slip + Impermeable ---
+        self.un_r_grid[:,0]      = -self.un_r_grid[:,1]       # No-Slip
+        self.un_theta_grid[:,0]  = -self.un_theta_grid[:,1]   # No-Slip
+        self.un_z_grid[:,0]      = -self.un_z_grid[:,1]       # Impermeable
+
+        # --- Top plate z = L (k = Nz-1) ---
+        if closed_top:
+            self.un_r_grid[:,-1]     = -self.un_r_grid[:,-2]      # No-Slip
+            self.un_theta_grid[:,-1] = -self.un_theta_grid[:,-2]  # No-Slip
+            self.un_z_grid[:,-1]     = -self.un_z_grid[:,-2]      # Impermeable
+        else:
+            self.un_r_grid[:,-1]     = self.un_r_grid[:,-2]       # Slip (Neumann)
+            self.un_theta_grid[:,-1] = self.un_theta_grid[:,-2]   # Slip (Neumann)
+            self.un_z_grid[:,-1] = 0.0 
+
+        # --- Internal Solids ---
+        self.un_r_grid[self.i_bc_list, self.j_bc_list] = 0.0
+        self.un_theta_grid[self.i_bc_list, self.j_bc_list] = 0.0
+        self.un_z_grid[self.i_bc_list, self.j_bc_list] = 0.0
 
     def apply_bc_T(self, closed_top=False):
         Nr, Nz = self.T_n_grid.shape
@@ -335,7 +367,7 @@ class NeutralFluidContainer:
         # STEP C: IMPLICIT DIFFUSION (Sink) - ONCE PER GLOBAL STEP
         # ==========================================================
         mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
-             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
+             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind, min_T_mu_calc=self.min_T_mu_calc
         )
         self.mu_grid[:,:] = mu_val
         self.kappa_grid[:,:] = kappa_val
@@ -363,7 +395,7 @@ class NeutralFluidContainer:
 
         # Viscosity
         mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
-             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
+             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind, min_T_mu_calc=self.min_T_mu_calc
         )
         self.mu_grid[:,:] = mu_val
         self.kappa_grid[:,:] = kappa_val
@@ -382,7 +414,7 @@ class NeutralFluidContainer:
 
         # Update Transport Coeffs
         mu_val, kappa_val, _ = neutral_fluid_helper.viscosity_and_conductivity(
-             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind
+             geom, self.T_n_grid, self.mass, species=self.name, kind=self.kind, min_T_mu_calc=self.min_T_mu_calc
         )
         self.mu_grid[:,:] = mu_val
         self.kappa_grid[:,:] = kappa_val
@@ -413,6 +445,16 @@ class NeutralFluidContainer:
             mub_grid,
             self.face_r, self.face_z
         )
+
+        # Bottom and Top Walls (z boundaries)
+        Sr[:, 1] = 0.0;  Sr[:, -2] = 0.0
+        St[:, 1] = 0.0;  St[:, -2] = 0.0
+        Sz[:, 1] = 0.0;  Sz[:, -2] = 0.0
+        
+        # Radial Wall (r boundary)
+        Sr[-2, :] = 0.0
+        St[-2, :] = 0.0
+        Sz[-2, :] = 0.0
 
         # Solve Azimuthal 
         neutral_fluid_helper.solve_implicit_viscosity_sor(
@@ -477,78 +519,3 @@ class NeutralFluidContainer:
             dt,
             self.mask_vel
         )
-
-    ###########################################################################################
-    ### Wall Heat Flux Calculations, (FIX, REFACTOR LATER)
-    ###########################################################################################
-
-    # REVIEW, UPDATE
-    def get_wall_heat_flux(self):
-        """
-        Calculates the heat flux density [W/m^2] dissipated into the radial wall (r=R).
-        q = h_eff * (T_slip - T_wall_fixed)
-        """
-        # 1. Gather Neighbor Properties (same as in apply_bc_T)
-        mask_fluid = (self.geom.mask[-1,:] == 1)
-        
-        # We need full arrays to match shapes, but we'll mask later
-        # Using neighbor (-2) properties for consistency with Kinetic Theory BC
-        T_gas   = self.T_n_grid[-2, :]
-        rho_gas = self.rho_grid[-2, :]
-        mu_gas  = self.mu_grid[-2, :]
-        kap_gas = self.kappa_grid[-2, :]
-        
-        # 2. Physics Constants
-        kb = constants.kb
-        m  = self.mass
-        gamma = self.gamma
-        cp = self.cp
-        
-        # 3. Calculate h_eff (Heat Transfer Coeff)
-        # v_th = sqrt(8 k T / pi m)
-        v_th = np.sqrt(8.0 * kb * T_gas / (np.pi * m))
-        
-        # lambda = 2 * mu / (rho * v_th)
-        rho_safe = np.maximum(rho_gas, self.nn_floor * m)
-        lam = 2.0 * mu_gas / (rho_safe * v_th)
-        
-        # Pr = Cp * mu / k
-        Pr = cp * mu_gas / np.maximum(kap_gas, 1e-15)
-        
-        # Jump Length
-        alpha = getattr(self, 'alpha', 0.5) 
-        coeff_alpha = (2.0 - alpha) / alpha
-        coeff_gamma = (2.0 * gamma) / (gamma + 1.0)
-        
-        L_jump = coeff_alpha * coeff_gamma * (lam / Pr)
-        L_jump = np.maximum(L_jump, 1e-12)
-        
-        h_eff = kap_gas / L_jump
-        
-        # 4. Calculate Flux
-        # Flux into wall = h_eff * (T_slip_node - T_solid_fixed)
-        # T_n_grid[-1] is the slip temperature we computed in the BC
-        T_slip = self.T_n_grid[-1, :]
-        q_wall = h_eff * (T_slip - self.T_wall)
-        
-        # Mask out non-fluid regions
-        q_wall[~mask_fluid] = 0.0
-        
-        return q_wall
-
-    # REVIEW, UPDATE
-    def get_total_wall_power(self):
-        """
-        Integrates the wall heat flux over the radial wall area to get Total Power [W].
-        """
-        q_wall = self.get_wall_heat_flux() # [W/m^2]
-        
-        # Area of wall faces: 2 * pi * R * dz
-        # Note: We use geom.rmax. 
-        # If your wall is stair-stepped, this assumes a straight cylinder at Rmax.
-        dA = 2.0 * np.pi * self.geom.rmax * self.geom.dz
-        
-        # Integrate (Sum)
-        total_power = np.sum(q_wall) * dA
-        
-        return total_power

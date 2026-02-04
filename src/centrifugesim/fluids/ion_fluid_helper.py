@@ -523,11 +523,7 @@ def update_Ti_joule_heating_implicit_kernel(
                                 ni, nu_in, nu_ei, mi, mn, mask, me, kb, dt):
     """
     Updates Ion Temperature (Ti) using Implicit Backward Euler.
-    
     Equation: 1.5 * n * k * (Ti_new - Ti_old) / dt = Q_joule + Q_ie + Q_in
-    
-    Note: Q_Joule_ions should already be scaled by 0.5 (as per previous discussion)
-          to represent the Ion share of the total heating.
     """
     Nr, Nz = Ti_out.shape
     
@@ -636,7 +632,6 @@ def solve_vtheta_viscous_SOR(vtheta, Jr, Bz, ni, nu_in, un_theta, eta,
                 # Check 1: Is this plasma?
                 if mask[i, j] == 1:
                     
-                    # Check 2: Is it TOUCHING a wall? (The "Padding" Fix)
                     # If any neighbor is 0 (Solid), force this node to 0 (No-Slip Wall)
                     if (mask[i+1, j] == 0 or mask[i-1, j] == 0 or 
                         mask[i, j+1] == 0 or mask[i, j-1] == 0):
