@@ -36,6 +36,7 @@ class HybridPICModel:
         # Total conductivity components
         self.sigma_P_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
         self.sigma_parallel_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
+        self.sigma_H_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
 
         # electron current density components
         self.Jer_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
@@ -83,6 +84,7 @@ class HybridPICModel:
     def update_conductivities(self, electron_fluid, ion_fluid):
         self.sigma_P_grid[:] = electron_fluid.sigma_P_grid + ion_fluid.sigma_P_grid
         self.sigma_parallel_grid[:] = electron_fluid.sigma_parallel_grid + ion_fluid.sigma_parallel_grid
+        self.sigma_H_grid[:] = electron_fluid.sigma_H_grid + ion_fluid.sigma_H_grid
 
     def update_Je_and_Ji_from_Jtotal(self, geom, electron_fluid, ion_fluid):
         """

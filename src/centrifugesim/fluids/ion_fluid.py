@@ -50,6 +50,7 @@ class IonFluidContainer:
         # -- Conductivities ---
         self.sigma_P_grid = np.zeros(shape, dtype=np.float64)        # Pedersen Conductivity
         self.sigma_parallel_grid = np.zeros(shape, dtype=np.float64) # Parallel Conductivity
+        self.sigma_H_grid = np.zeros(shape, dtype=np.float64) # Hall Conductivity
 
     def update_drift_velocities(self, geom, hybrid_pic):
         """
