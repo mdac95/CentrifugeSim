@@ -902,3 +902,216 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
         print(f"[Te-DIRECT] Solved. Max Delta T = {diff:.3f} K")
         
     return Te_new
+
+
+##################################################################################################################
+##################################################################################################################
+####################################### Adding to test Ambipolar diffusion #######################################
+##################################################################################################################
+##################################################################################################################
+
+
+@njit(cache=True)
+def compute_ambipolar_coefficients(Te, Ti, nu_in, beta_e, beta_i, mi, kb):
+    """
+    Returns the Parallel and Perpendicular Ambipolar Diffusion Coefficients [m^2/s]
+    """
+    Nr, Nz = Te.shape
+    Da_par = np.zeros((Nr, Nz))
+    Da_perp = np.zeros((Nr, Nz))
+    
+    for i in range(Nr):
+        for j in range(Nz):
+            nu_safe = max(nu_in[i, j], 1e-5)
+            # Classical Ambipolar Diffusion D = k(Te+Ti)/(m*nu)
+            Da_p = (kb * (Te[i, j] + Ti[i, j])) / (mi * nu_safe)
+            
+            # Magnetized reduction
+            magnetization_factor = 1.0 + beta_e[i, j] * beta_i[i, j]
+            
+            Da_par[i, j] = Da_p
+            Da_perp[i, j] = Da_p / magnetization_factor
+            
+    return Da_par, Da_perp
+
+
+
+@njit(cache=True)
+def assemble_ne_diffusion_FV(ne_star, Da_par, Da_perp, 
+                             mask, dr, dz, r_coords, dt, 
+                             Te, mi, 
+                             i_cathode, j_cathode, Jiz_grid, # Jiz_grid unused now
+                             delta_sheath=1.0, 
+                             closed_top=True):
+    """
+    Assembles Matrix for ne diffusion with explicit Cathode Sink (Bohm Flux).
+    """
+    Nr, Nz = ne_star.shape
+    kb = constants.kb
+    qe = constants.q_e
+    
+    aP = np.zeros((Nr, Nz))
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz))
+    
+    # Map not strictly needed if we iterate the indices directly, 
+    # but good for safety if we need to check neighbors later.
+    cathode_flag = np.zeros((Nr, Nz), dtype=np.int32)
+    for k in range(len(i_cathode)):
+        ic = i_cathode[k]
+        jc = j_cathode[k]
+        if ic < Nr and jc < Nz:
+            cathode_flag[ic, jc] = 1
+
+    for i in range(Nr):
+        r_i = r_coords[i]
+        
+        # --- Cell Geometry ---
+        if i == 0: 
+            r_edge = 0.5 * dr
+            Vol = np.pi * r_edge**2 * dz
+            Area_E = 2.0 * np.pi * r_edge * dz
+            Area_W = 0.0 
+            Area_N = np.pi * r_edge**2
+            Area_S = np.pi * r_edge**2
+            dist_E = dr
+            dist_W = 1.0 
+        else:
+            Vol = 2.0 * np.pi * r_i * dr * dz
+            r_east = r_i + 0.5*dr
+            r_west = r_i - 0.5*dr
+            Area_E = 2.0 * np.pi * r_east * dz
+            Area_W = 2.0 * np.pi * r_west * dz
+            Area_N = 2.0 * np.pi * r_i * dr
+            Area_S = 2.0 * np.pi * r_i * dr
+            dist_E = dr
+            dist_W = dr
+            
+        dist_N = dz
+        dist_S = dz
+        
+        for j in range(Nz):
+            if mask[i, j] == 0:
+                aP[i, j] = 1.0
+                b[i, j] = ne_star[i, j]
+                continue
+            
+            cs = np.sqrt(kb * Te[i, j] / mi)
+            D_par_loc = Da_par[i, j]
+            D_perp_loc = Da_perp[i, j]
+            
+            has_N = (j < Nz-1) and (mask[i, j+1] == 1)
+            has_S = (j > 0)    and (mask[i, j-1] == 1)
+            has_E = (i < Nr-1) and (mask[i+1, j] == 1)
+            has_W = (i > 0)    and (mask[i-1, j] == 1)
+            
+            # --- Standard Faces ---
+            if has_E:
+                D_face = 0.5 * (D_perp_loc + Da_perp[i+1, j])
+                aE[i, j] = D_face * Area_E / dist_E
+            elif i == Nr-1: # R_MAX Bohm Sink
+                aP[i, j] += delta_sheath * cs * Area_E
+
+            if has_W:
+                D_face = 0.5 * (D_perp_loc + Da_perp[i-1, j])
+                aW[i, j] = D_face * Area_W / dist_W
+
+            if has_N:
+                D_face = 0.5 * (D_par_loc + Da_par[i, j+1])
+                aN[i, j] = D_face * Area_N / dist_N
+            elif j == Nz-1 and closed_top: # Z_MAX Bohm Sink
+                aP[i, j] += delta_sheath * cs * Area_N
+                
+            if has_S:
+                D_face = 0.5 * (D_par_loc + Da_par[i, j-1])
+                aS[i, j] = D_face * Area_S / dist_S
+            elif j == 0: # Z_MIN Bohm Sink
+                aP[i, j] += delta_sheath * cs * Area_S
+
+            # --- Assembly ---
+            inertia = Vol / dt
+            sum_diff = aE[i, j] + aW[i, j] + aN[i, j] + aS[i, j]
+            aP[i, j] += inertia + sum_diff
+            b[i, j] = inertia * ne_star[i, j]
+
+    """
+    # --- 4. Explicit Cathode Sink (Internal Boundary) ---
+    # Since the cathode is masked, the main loop sees it as insulating (Neumann=0).
+    # We must explicitly add the Bohm sink term.
+    for k in range(len(i_cathode)):
+        i = i_cathode[k]
+        j = j_cathode[k]
+        
+        # Ensure we are on a valid plasma node
+        if i < Nr and j < Nz and mask[i, j] == 1:
+            # We assume cathode is the "South" neighbor (at j-1)
+            # Area_S was calculated implicitly above, we reconstruct it:
+            if i == 0:
+                r_edge = 0.5 * dr
+                Area_S = np.pi * r_edge**2
+            else:
+                r_i = r_coords[i]
+                Area_S = 2.0 * np.pi * r_i * dr
+            
+            cs = np.sqrt(kb * Te[i, j] / mi)
+            
+            # Add Sink to Diagonal
+            # Flux = delta * n * cs
+            # Term = Flux * Area = (delta * cs * Area) * n
+            aP[i, j] += delta_sheath * cs * Area_S
+    """
+
+    return aP, aE, aW, aN, aS, b
+
+
+@njit(cache=True)
+def compute_boundary_recycling_source(ne_new, Te, mi, mask, 
+                                      dr, dz, r_coords, dt, 
+                                      i_cathode, j_cathode, Jiz_grid,
+                                      delta_sheath=1.0, closed_top=True):
+    """
+    Calculates neutral source from wall recycling.
+    """
+    Nr, Nz = ne_new.shape
+    dne_src = np.zeros((Nr, Nz))
+    kb = constants.kb
+    qe = constants.q_e
+    
+    inv_dr = 1.0 / dr
+    inv_dz = 1.0 / dz
+    
+    # 1. Standard Bohm Recycling (Outer Walls)
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 0: continue
+                
+            cs = np.sqrt(kb * Te[i, j] / mi)
+            flux_mag = delta_sheath * ne_new[i, j] * cs
+            
+            if j == 0:
+                dne_src[i, j] += flux_mag * dt * inv_dz
+            if j == Nz-1 and closed_top:
+                dne_src[i, j] += flux_mag * dt * inv_dz
+            if i == Nr-1:
+                dne_src[i, j] += flux_mag * dt * inv_dr
+
+    """
+    # 2. Cathode Recycling (Bohm Flux)
+    for k in range(len(i_cathode)):
+        i = i_cathode[k]
+        j = j_cathode[k]
+        
+        if i < Nr and j < Nz and mask[i, j] == 1:
+            cs = np.sqrt(kb * Te[i, j] / mi)
+            
+            # Flux = delta * n * cs
+            flux_mag = delta_sheath * ne_new[i, j] * cs
+            
+            # Add neutrals to this cell
+            dne_src[i, j] += flux_mag * dt * inv_dz
+    """
+
+    return dne_src

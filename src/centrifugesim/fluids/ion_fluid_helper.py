@@ -946,3 +946,25 @@ def solve_heat_conduction_sor_kernel(Ti, Ti_old, ni, k_par, k_perp, br, bz, mask
             return max_diff
             
     return max_diff
+
+def add_friction_heating_theta_kernel(Ti, vi_theta, un_theta, nu_in, mi, dt, mask):
+    """
+    Adds heating due to ion-neutral friction in the azimuthal direction.
+    Q_friction = mi * ni * nu_in * (vi_theta - un_theta)^2
+    dT = (2/3) * (Q_friction / (ni * kb)) * dt
+    All to ions (should partition 1/2 to ions and 1/2 to neutrals but making all to ions for now)
+    """
+    Nr, Nz = Ti.shape
+    kb = constants.kb
+    
+    # Pre-calculate constant factor
+    # (2/3) * (mi / kb)
+    factor = (2.0 * mi) / (3.0 * kb)
+
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                v_diff = vi_theta[i, j] - un_theta[i, j]
+                # Note: ni cancels out in the temperature update equation
+                dT = factor * nu_in[i, j] * (v_diff * v_diff)
+                Ti[i, j] += dT * dt
