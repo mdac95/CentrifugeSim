@@ -1252,6 +1252,81 @@ def update_neutral_vtheta_implicit_source(un_theta, vi_theta,
                 un_theta[i, j] = 0.0
 
 @njit(cache=True)
+def update_neutral_vr_implicit_source(un_r, vi_r, 
+                                      ni, nu_in, mi, 
+                                      nn, mn, 
+                                      dt, mask):
+    """
+    Updates Neutral v_r using an Implicit Source term for Drag.
+    """
+    Nr, Nz = un_r.shape
+    
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                # Local Densities
+                rho_n = nn[i, j] * mn
+                rho_i = ni[i, j] * mi
+                
+                # Collision Rate (Coupling Strength)
+                # alpha has units [1/s]
+                if rho_n > 1e-20:
+                    nu_coupling = (rho_i * nu_in[i, j]) / rho_n
+                else:
+                    nu_coupling = 0.0
+                
+                # Implicit Update
+                denom = 1.0 + dt * nu_coupling
+                
+                u_old = un_r[i, j]
+                v_ion = vi_r[i, j]
+                
+                # Numerator: Old Velocity + 'Target' velocity weighted by coupling
+                numerator = u_old + dt * (nu_coupling * v_ion)
+                
+                un_r[i, j] = numerator / denom
+                
+            else:
+                un_r[i, j] = 0.0
+
+@njit(cache=True)
+def update_neutral_vz_implicit_source(un_z, vi_z, 
+                                      ni, nu_in, mi, 
+                                      nn, mn, 
+                                      dt, mask):
+    """
+    Updates Neutral v_z using an Implicit Source term for Drag.
+    """
+    Nr, Nz = un_z.shape
+    
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                # Local Densities
+                rho_n = nn[i, j] * mn
+                rho_i = ni[i, j] * mi
+                
+                # Collision Rate (Coupling Strength)
+                if rho_n > 1e-20:
+                    nu_coupling = (rho_i * nu_in[i, j]) / rho_n
+                else:
+                    nu_coupling = 0.0
+                
+                # Implicit Update
+                denom = 1.0 + dt * nu_coupling
+                
+                u_old = un_z[i, j]
+                v_ion = vi_z[i, j]
+                
+                # Numerator: Old Velocity + 'Target' velocity weighted by coupling
+                numerator = u_old + dt * (nu_coupling * v_ion)
+                
+                un_z[i, j] = numerator / denom
+                
+            else:
+                un_z[i, j] = 0.0
+
+@njit(cache=True)
 def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn, 
                                         nu_en, nu_in, 
                                         me, mi, mn, dt, mask, Cv):

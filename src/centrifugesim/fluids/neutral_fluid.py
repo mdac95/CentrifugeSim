@@ -506,11 +506,38 @@ class NeutralFluidContainer:
         """
         Updates Neutral velocity due to collisions with Ions using an implicit formula.
         Used when fluid ions are on.
-        Do not use this when kinetic ions are on.
         """
+
+        # --- 2. Update ut ---
         neutral_fluid_helper.update_neutral_vtheta_implicit_source(
             self.un_theta_grid,
             ion_fluid.vi_theta_grid,
+            ion_fluid.ni_grid,
+            ion_fluid.nu_i_grid,
+            ion_fluid.m_i,
+            self.nn_grid,
+            self.mass,
+            dt,
+            self.mask_vel
+        )
+
+        # --- 2. Update ur ---
+        neutral_fluid_helper.update_neutral_vr_implicit_source(
+            self.un_r_grid,
+            ion_fluid.vi_r_grid,
+            ion_fluid.ni_grid,
+            ion_fluid.nu_i_grid,
+            ion_fluid.m_i,
+            self.nn_grid,
+            self.mass,
+            dt,
+            self.mask_vel
+        )
+
+        # --- 3. Update uz ---
+        neutral_fluid_helper.update_neutral_vz_implicit_source(
+            self.un_z_grid,
+            ion_fluid.vi_z_grid,
             ion_fluid.ni_grid,
             ion_fluid.nu_i_grid,
             ion_fluid.m_i,

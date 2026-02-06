@@ -281,7 +281,8 @@ class ElectronFluidContainer:
             neutral_fluid.T_n_grid[geom.mask==1] += dt_sub*Q_coll_en[geom.mask==1]/(3/2*constants.kb*nn[geom.mask==1])
 
 
-    def update_density_implicit(self, geom, ion_fluid, nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt):
+    # stable version being used. However no diffusion across cells, leading to unphysical jumps in ne
+    def update_density_implicit_local(self, geom, ion_fluid, nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt):
         """
         Updates ne using the Analytic Logistic Solution with Anisotropic Diffusion.
         Includes Log-Space Clamping to prevent ionization-heating instabilities.
@@ -355,6 +356,213 @@ class ElectronFluidContainer:
         
         # Finalize
         self.ne_grid = 10**(log_final)
+
+    def update_density_implicit(self, geom, ion_fluid, hybrid_pic,
+                                nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt, 
+                                delta_sheath=1.0, closed_top=True):
+        """
+        Updates electron density using Operator Splitting.
+        
+        Returns:
+            dne_chem (Array): Change in density due to Ionization/Recombination only. 
+                              (Use this to update nn everywhere).
+            dne_boundary (Array): Density of neutrals created at walls due to recycling.
+                                  (Add this to nn at boundaries).
+        """
+        
+        # --- PHASE 1: CHEMISTRY (Local Source/Sink) ---
+        ne_star = np.zeros_like(self.ne_grid)
+        
+        # Disable 0D diffusion loss for this step
+        nu_loss_dummy = np.zeros_like(self.ne_grid) 
+        
+        electron_fluid_helper.time_advance_ne_analytic_kernel_anisotropic(
+            ne_star,            # Output: n_star
+            self.ne_grid,       # Input: n_old
+            nu_iz_grid,         
+            nu_loss_dummy,      # <--- DISABLED
+            nu_RR_recomb_grid,
+            beta_rec_grid,
+            dt,
+            geom.mask,
+            self.ne_floor
+        )
+
+        # Stability: Clamp Log-Space Overshoot
+        ne_floor_log = 1e10
+        log_old = np.log10(np.maximum(self.ne_grid, ne_floor_log))
+        log_star = np.log10(np.maximum(ne_star, ne_floor_log))
+        
+        diff = log_star - log_old
+        MAX_LOG_STEP = 0.5 
+        diff_clipped = np.clip(diff, -MAX_LOG_STEP, MAX_LOG_STEP)
+        
+        # Recalculate n_star
+        ne_star = 10**(log_old + diff_clipped)
+        
+        # 1. Calculate Chemistry Delta (for Neutral update)
+        dne_chem = ne_star - self.ne_grid
+
+        # --- PHASE 2: TRANSPORT (Global 2D Diffusion) ---
+        
+        # Diffusion Coefficients
+        Da_par, Da_perp = electron_fluid_helper.compute_ambipolar_coefficients(
+            self.Te_grid,
+            ion_fluid.Ti_grid,
+            ion_fluid.nu_i_grid,
+            self.beta_e_grid,
+            ion_fluid.beta_i_grid,
+            ion_fluid.m_i,
+            constants.kb
+        )
+
+        #Get Cathode info
+        #i_cathode = geom.i_cathode_z_sheath # Or specific attribute from your geom
+        #j_cathode = geom.j_cathode_z_sheath
+        # Note: Ensure these match the user snippet's definition or pass them in
+        # If geom doesn't store them exactly as user snippet, reconstruct them here:
+        rmax_injection = geom.rmax_cathode
+        i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
+        j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
+        
+        # Assemble 2D Matrix (Insulating Internal, Bohm External)
+        aP, aE, aW, aN, aS, b = electron_fluid_helper.assemble_ne_diffusion_FV(
+            ne_star,
+            Da_par, Da_perp,
+            geom.mask, geom.dr, geom.dz, geom.r, dt,
+            self.Te_grid, ion_fluid.m_i,
+            i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
+            delta_sheath=delta_sheath, 
+            closed_top=closed_top
+        )
+        
+        # Solve
+        ne_final = electron_fluid_helper.solve_direct_fast(
+            self.Nr, self.Nz, aP, aE, aW, aN, aS, b
+        )
+        
+        self.ne_grid = np.maximum(ne_final, self.ne_floor)
+        
+        # 2. Calculate Boundary Recycling Delta
+        dne_boundary = electron_fluid_helper.compute_boundary_recycling_source(
+            self.ne_grid,
+            self.Te_grid,
+            ion_fluid.m_i,
+            geom.mask,
+            geom.dr, geom.dz, geom.r, dt,
+            i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
+            delta_sheath=delta_sheath,
+            closed_top=closed_top
+        )
+        
+        return dne_chem, dne_boundary
+    
+    def update_density_implicit_subcycling(self, geom, ion_fluid, hybrid_pic,
+                                nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, 
+                                nn_grid, 
+                                dt, 
+                                delta_sheath=1.0, closed_top=True):
+        """
+        Updates electron density using Operator Splitting with Sub-Cycling.
+        Only builds transport matrix ONCE per global step.
+        """
+        
+        # 1. Determine Sub-steps
+        max_nu_iz = np.max(nu_iz_grid)
+        if max_nu_iz > 1e-10:
+            dt_suggested = 0.2 / max_nu_iz
+            n_sub = int(np.ceil(dt / dt_suggested))
+        else:
+            n_sub = 1
+            
+        n_sub = min(n_sub, 20)
+        n_sub = max(n_sub, 1)
+        dt_sub = dt / n_sub
+        
+        # Accumulators
+        total_dne_chem = np.zeros_like(self.ne_grid)
+        total_dne_boundary = np.zeros_like(self.ne_grid)
+
+        # ------------------------------------------------------------------
+        # PRE-CALCULATION (Heavy lifting ONCE)
+        # ------------------------------------------------------------------
+        # Since Te/Ti don't change in sub-steps, D is constant.
+        Da_par, Da_perp = electron_fluid_helper.compute_ambipolar_coefficients(
+            self.Te_grid, ion_fluid.Ti_grid, ion_fluid.nu_i_grid,
+            self.beta_e_grid, ion_fluid.beta_i_grid, ion_fluid.m_i, constants.kb
+        )
+
+        rmax_injection = geom.rmax_cathode
+        i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
+        j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
+        
+        # Build the Matrix components A (aP, aE...) just once.
+        # Note: 'b' will be recalculated inside the loop, but the coefficients are fixed.
+        # We pass ne_star just to get the shapes/dummy b, we won't use that b.
+        aP_const, aE, aW, aN, aS, _ = electron_fluid_helper.assemble_ne_diffusion_FV(
+            self.ne_grid, Da_par, Da_perp,
+            geom.mask, geom.dr, geom.dz, geom.r, dt_sub,
+            self.Te_grid, ion_fluid.m_i,
+            i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
+            delta_sheath=delta_sheath, closed_top=closed_top
+        )
+
+        # ---------------- SUBCYCLING LOOP ----------------
+        for k in range(n_sub):
+            
+            # A. Chemistry (Local)
+            ne_star = np.zeros_like(self.ne_grid)
+            nu_loss_dummy = np.zeros_like(self.ne_grid)
+            
+            electron_fluid_helper.time_advance_ne_analytic_kernel_anisotropic(
+                ne_star, self.ne_grid, nu_iz_grid, nu_loss_dummy,      
+                nu_RR_recomb_grid, beta_rec_grid, dt_sub,
+                geom.mask, self.ne_floor
+            )
+
+            # Stability Clamps
+            ne_floor_log = 1e10
+            log_old = np.log10(np.maximum(self.ne_grid, ne_floor_log))
+            log_star = np.log10(np.maximum(ne_star, ne_floor_log))
+            diff = np.clip(log_star - log_old, -0.5, 0.5)
+            ne_star = 10**(log_old + diff)
+            
+            # Neutral Limiter
+            dne_chem_step = ne_star - self.ne_grid
+            max_ionizable = 0.9 * np.maximum(nn_grid - total_dne_chem, 0.0)
+            dne_chem_step = np.where(dne_chem_step > max_ionizable, max_ionizable, dne_chem_step)
+            
+            ne_star = self.ne_grid + dne_chem_step
+            total_dne_chem += dne_chem_step
+
+            # B. Transport (Solve using pre-built coefficients)            
+            aP, aE, aW, aN, aS, b = electron_fluid_helper.assemble_ne_diffusion_FV(
+                ne_star, Da_par, Da_perp,
+                geom.mask, geom.dr, geom.dz, geom.r, dt_sub,
+                self.Te_grid, ion_fluid.m_i,
+                i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
+                delta_sheath=delta_sheath, closed_top=closed_top
+            )
+            
+            ne_final = electron_fluid_helper.solve_direct_fast(
+                self.Nr, self.Nz, aP, aE, aW, aN, aS, b
+            )
+            
+            # C. Boundary Recycling
+            dne_boundary_step = electron_fluid_helper.compute_boundary_recycling_source(
+                ne_final, self.Te_grid, ion_fluid.m_i,
+                geom.mask, geom.dr, geom.dz, geom.r, dt_sub,
+                i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
+                delta_sheath=delta_sheath, closed_top=closed_top
+            )
+            total_dne_boundary += dne_boundary_step
+
+            # Update for next sub-step
+            self.ne_grid = np.maximum(ne_final, self.ne_floor)
+        
+        # ---------------- END SUBCYCLING ----------------
+
+        return total_dne_chem, total_dne_boundary
 
     def update_Te_implicit(self, geom, hybrid_pic, neutral_fluid, ion_fluid, 
                            Q_Joule_e_grid, 

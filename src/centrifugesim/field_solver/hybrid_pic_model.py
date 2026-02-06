@@ -65,21 +65,21 @@ class HybridPICModel:
         self.Bmag_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
 
         # ------- Device fields ---------
-        self.Er_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
-        self.Et_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
-        self.Ez_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
+        #self.Er_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
+        #self.Et_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
+        #self.Ez_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
 
-        self.Br_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
-        self.Bt_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
-        self.Bz_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
+        #self.Br_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
+        #self.Bt_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
+        #self.Bz_grid_d = cp.zeros((self.Nr, self.Nz)).astype(cp.float64)
 
     def compute_B_aux(self):
         self.Bmag_grid[:] = np.sqrt(self.Br_grid**2 + self.Bz_grid**2)
         self.br_grid[:] = np.where(self.Bmag_grid==0, 0, self.Br_grid/self.Bmag_grid)
         self.bz_grid[:] = np.where(self.Bmag_grid==0, 0, self.Bz_grid/self.Bmag_grid)
 
-        self.Br_grid_d = cp.asarray(self.Br_grid)
-        self.Bz_grid_d = cp.asarray(self.Bz_grid)
+        #self.Br_grid_d = cp.asarray(self.Br_grid)
+        #self.Bz_grid_d = cp.asarray(self.Bz_grid)
 
     def update_conductivities(self, electron_fluid, ion_fluid):
         self.sigma_P_grid[:] = electron_fluid.sigma_P_grid + ion_fluid.sigma_P_grid
@@ -209,8 +209,8 @@ class HybridPICModel:
         q_ohm = self.Jr_grid*self.Er_grid + self.Jz_grid*self.Ez_grid
         self.q_ohm_grid = np.copy(q_ohm)
 
-        self.Er_grid_d = cp.asarray(self.Er_grid)
-        self.Ez_grid_d = cp.asarray(self.Ez_grid)
+        #self.Er_grid_d = cp.asarray(self.Er_grid)
+        #self.Ez_grid_d = cp.asarray(self.Ez_grid)
 
         del phi, Er, Ez, Jr, Jz, q_ohm
 
