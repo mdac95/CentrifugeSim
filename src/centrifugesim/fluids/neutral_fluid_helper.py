@@ -190,7 +190,6 @@ def apply_solid_mask_inplace(fluid, rho, ur, ut, uz):
     for i in prange(Nr):
         for k in range(Nz):
             if fluid[i,k] == 0:
-                # no fluid in solid: no-slip, keep density frozen (or set to a fixed rho_solid)
                 ur[i,k] = 0.0
                 ut[i,k] = 0.0
                 uz[i,k] = 0.0
@@ -385,7 +384,8 @@ def viscosity_and_conductivity(
     lj_params=None,         # tuple (sigma [m], eps_over_k [K]) if you don't want to use 'species'
     model="LJ",             # "LJ" or "Sutherland"
     sutherland=None,        # dict with keys {'mu_ref','T_ref','S'} if model="Sutherland"
-    f_dof=None              # integer degrees of freedom to override kind (e.g., include vibrations)
+    f_dof=None,             # integer degrees of freedom to override kind (e.g., include vibrations)
+    min_T_mu_calc=2000.0
 ):
     """
     Compute dynamic viscosity μ [Pa·s] and thermal conductivity k [W/m/K]
@@ -422,6 +422,9 @@ def viscosity_and_conductivity(
     T = np.asarray(T) + 1
     if np.any(T <= 0):
         raise ValueError("Temperature contains non-positive values.")
+    
+    T = np.maximum(T, min_T_mu_calc)
+    
     # Decide transport model for μ
     used = {"model": model}
 
@@ -784,29 +787,39 @@ def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,
                     rho = max(nn[i, j], 1e12) * mn
                     A_time = rho / dt
 
-                    # --- EAST / WEST ---
-                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 1.0 * c_east_base
-                    else:                 val_E = un_theta[i+1, j]; c_east = c_east_base
+                    # --- EAST / WEST (Radial Walls) ---
+                    if mask[i+1, j] == 0: 
+                        val_E = 0.0; c_east = 2.0 * c_east_base 
+                    else:                 
+                        val_E = un_theta[i+1, j]; c_east = c_east_base
 
-                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 1.0 * c_west_base
-                    else:                 val_W = un_theta[i-1, j]; c_west = c_west_base
+                    if mask[i-1, j] == 0: 
+                        val_W = 0.0; c_west = 2.0 * c_west_base
+                    else:                 
+                        val_W = un_theta[i-1, j]; c_west = c_west_base
                     
                     # --- NORTH (Top Wall) ---
                     if j == Nz - 2:
                         if mask[i, j+1] == 0: 
-                            val_N = 0.0; c_north = 1.0 * c_north_base
+                            # Solid block above -> No Slip
+                            val_N = 0.0; c_north = 2.0 * c_north_base 
                         elif closed_top:
-                            val_N = 0.0; c_north = 1.0 * c_north_base # No-Slip
+                            # Closed Top -> No Slip
+                            val_N = 0.0; c_north = 2.0 * c_north_base 
                         else:
-                            val_N = 0.0; c_north = 0.0 # Slip (Neumann)
-                    elif mask[i, j+1] == 0:   val_N = 0.0; c_north = 1.0 * c_north_base
-                    else:                     val_N = un_theta[i, j+1]; c_north = c_north_base
+                            # Open Top -> Slip (Neumann)
+                            val_N = 0.0; c_north = 0.0 
+                    elif mask[i, j+1] == 0:   
+                        # Internal Solid Above -> No Slip
+                        val_N = 0.0; c_north = 2.0 * c_north_base
+                    else:                     
+                        val_N = un_theta[i, j+1]; c_north = c_north_base
 
                     # --- SOUTH (Bottom Wall) ---
                     if j == 1:
-                        val_S = 0.0; c_south = 1.0 * c_south_base
+                        val_S = 0.0; c_south = 2.0 * c_south_base
                     elif mask[i, j-1] == 0:
-                        val_S = 0.0; c_south = 1.0 * c_south_base
+                        val_S = 0.0; c_south = 2.0 * c_south_base
                     else:
                         val_S = un_theta[i, j-1]; c_south = c_south_base
 
@@ -863,35 +876,36 @@ def solve_implicit_viscosity_r_sor(ur, nn, mn, mask, mu_grid, source_term,
 
                 # --- EAST / WEST (Radial Boundaries) ---
                 if i == Nr - 1:           
-                    val_E = 0.0; c_east = 1.0 * c_east_base
+                    val_E = 0.0; c_east = 2.0 * c_east_base
                 elif mask[i+1, j] == 0:   
-                    val_E = 0.0; c_east = 1.0 * c_east_base
+                    val_E = 0.0; c_east = 2.0 * c_east_base
                 else:                     
                     val_E = ur[i+1, j]; c_east = c_east_base
 
                 if mask[i-1, j] == 0:     
-                    val_W = 0.0; c_west = 1.0 * c_west_base
+                    val_W = 0.0; c_west = 2.0 * c_west_base
                 else:                     
                     val_W = ur[i-1, j]; c_west = c_west_base
 
                 # --- NORTH / SOUTH (Axial Boundaries) ---
                 if j == Nz - 2:
                     if closed_top:
-                        c_north = 1.0 * c_north_base
+                        c_north = 2.0 * c_north_base
                         val_N = 0.0
                     elif mask[i, j+1] == 0: 
-                        val_N = 0.0; c_north = 1.0 * c_north_base
+                        val_N = 0.0; c_north = 2.0 * c_north_base
                     else:
+                        # Open Top (Slip) -> 0.0 flux (Correct)
                         val_N = 0.0; c_north = 0.0
                 elif mask[i, j+1] == 0:   
-                    val_N = 0.0; c_north = 1.0 * c_north_base
+                    val_N = 0.0; c_north = 2.0 * c_north_base
                 else:                     
                     val_N = ur[i, j+1]; c_north = c_north_base
 
                 if j == 1: # Bottom Wall
-                    val_S = 0.0; c_south = 1.0 * c_south_base
+                    val_S = 0.0; c_south = 2.0 * c_south_base
                 elif mask[i, j-1] == 0:
-                    val_S = 0.0; c_south = 1.0 * c_south_base
+                    val_S = 0.0; c_south = 2.0 * c_south_base
                 else:
                     val_S = ur[i, j-1]; c_south = c_south_base
 
@@ -917,7 +931,6 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid, source_term,
     """
     Implicit viscosity for AXIAL velocity u_z.
     Longitudinal (z) terms boosted by 4/3.
-    Boundary Factors fixed to 1.0 for Nodal Grid.
     Top Wall (zmax) is ALWAYS Dirichlet (Impermeable), even if open top.
     """
     Nr, Nz = uz.shape
@@ -951,27 +964,27 @@ def solve_implicit_viscosity_z_sor(uz, nn, mn, mask, mu_grid, source_term,
                     A_time = rho / dt
 
                     # --- EAST / WEST ---
-                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 1.0 * c_east_base
+                    if mask[i+1, j] == 0: val_E = 0.0; c_east = 2.0 * c_east_base
                     else:                 val_E = uz[i+1, j]; c_east = c_east_base
 
-                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 1.0 * c_west_base
+                    if mask[i-1, j] == 0: val_W = 0.0; c_west = 2.0 * c_west_base
                     else:                 val_W = uz[i-1, j]; c_west = c_west_base
 
                     # --- NORTH (Top Wall) ---
                     # Crucial Difference: uz is ALWAYS 0 at the top (Impermeable)
                     if j == Nz - 2:
                         # Regardless of closed_top, u_z must be 0 at the boundary
-                        val_N = 0.0; c_north = 1.0 * c_north_base
+                        val_N = 0.0; c_north = 2.0 * c_north_base
                     elif mask[i, j+1] == 0:   
-                        val_N = 0.0; c_north = 1.0 * c_north_base
+                        val_N = 0.0; c_north = 2.0 * c_north_base
                     else:                     
                         val_N = uz[i, j+1]; c_north = c_north_base
 
                     # --- SOUTH (Bottom Wall) ---
                     if j == 1:
-                        val_S = 0.0; c_south = 1.0 * c_south_base
+                        val_S = 0.0; c_south = 2.0 * c_south_base
                     elif mask[i, j-1] == 0:
-                        val_S = 0.0; c_south = 1.0 * c_south_base
+                        val_S = 0.0; c_south = 2.0 * c_south_base
                     else:
                         val_S = uz[i, j-1]; c_south = c_south_base
                         

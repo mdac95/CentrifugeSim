@@ -36,6 +36,7 @@ class HybridPICModel:
         # Total conductivity components
         self.sigma_P_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
         self.sigma_parallel_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
+        self.sigma_H_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
 
         # electron current density components
         self.Jer_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
@@ -83,6 +84,7 @@ class HybridPICModel:
     def update_conductivities(self, electron_fluid, ion_fluid):
         self.sigma_P_grid[:] = electron_fluid.sigma_P_grid + ion_fluid.sigma_P_grid
         self.sigma_parallel_grid[:] = electron_fluid.sigma_parallel_grid + ion_fluid.sigma_parallel_grid
+        self.sigma_H_grid[:] = electron_fluid.sigma_H_grid + ion_fluid.sigma_H_grid
 
     def update_Je_and_Ji_from_Jtotal(self, geom, electron_fluid, ion_fluid):
         """
@@ -217,9 +219,6 @@ class HybridPICModel:
         # compute q_ohm for electrons and ions separately
         self.q_ohm_electrons_grid = self.Jer_grid*self.Er_grid + self.Jez_grid*self.Ez_grid
         self.q_ohm_ions_grid = self.Jir_grid*self.Er_grid + self.Jiz_grid*self.Ez_grid
-
-        #self.q_ohm_electrons_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
-        #self.q_ohm_ions_grid[geom.i_cathode_z_sheath, geom.j_cathode_z_sheath+1] = 0.0
         
     # -------- Calculate electrodes currents
     def compute_electrode_currents(self, geom, return_parts=False):
