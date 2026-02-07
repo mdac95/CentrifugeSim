@@ -266,10 +266,10 @@ class IonFluidContainer:
         )
 
         # Ensure Neumann BC at cathode
-        #rmax_injection = geom.rmax_cathode
-        #i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
-        #j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
-        #self.Ti_grid[i_cathode, j_cathode] = self.Ti_grid[i_cathode, j_cathode+1]
+        rmax_injection = geom.rmax_cathode
+        i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
+        j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
+        self.Ti_grid[i_cathode, j_cathode] = self.Ti_grid[i_cathode, j_cathode+1]
 
         # Add Neumann or Dirichlet at anode?
         # Make solve_heat_conduction_sor_kernel compatible with geometry boundary conditions
