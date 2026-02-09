@@ -137,281 +137,6 @@ def electron_conductivities(
     return sigma_par_e, sigma_P_e, sigma_H_e, Omega_e/nu_e  # β_e
 
 
-@numba.jit(nopython=True, parallel=True, nogil=True)
-def solve_step(Te, Te_new, dr, dz, r_vec, n_e, Q_Joule,
-               br, bz, kappa_parallel, kappa_perp,
-               Jer, Jez,
-               mask, dt, ion_mass):
-    """
-    Advances electron temperature with specific boundary conditions:
-    1. Bohm sheath loss ONLY at z=0 (j=0) and r=R_max (i=NR-1).
-    2. Internal masked objects have NO Bohm loss, but allow Advection.
-    3. Advection at internal masks driven by u_e (-J_e).
-    4. Top boundary (z=zmax) is insulating (no flux).
-    """
-    NR, NZ = Te.shape
-    
-    # Constants
-    kb = constants.kb
-    qe = constants.q_e
-    
-    # Sheath Transmission Factor
-    delta_sheath = 6.0 
-    alpha = 2.5 * kb / qe
-
-    # ITERATE OVER ALL NODES
-    for i in numba.prange(0, NR):
-        for j in range(0, NZ):
-
-            # Skip masked cells or vacuum
-            if not (mask[i, j] == 1 and n_e[i, j] > 0.0):
-                continue
-
-            # Pre-calculate sound speed for this node (used for BCs)
-            cs_local = np.sqrt((kb * Te[i, j]) / ion_mass)
-            # Only used at z=0 and r=R_max
-            sheath_flux_mag = delta_sheath * n_e[i, j] * cs_local * (kb * Te[i, j])
-
-            # =========================
-            # 1. Conduction & BC Fluxes
-            # =========================
-
-            # --- Right face (i+1/2) ---
-            qr_rh = 0.0
-            
-            # CASE A: Internal or Symmetry Interface
-            if i < NR - 1:
-                if mask[i+1, j] == 1:
-                    # EXISTING: Full Anisotropic Stencil checks
-                    if (j < NZ-1 and j > 0 and 
-                        mask[i, j+1] == 1 and mask[i, j-1] == 1 and
-                        mask[i+1, j+1] == 1 and mask[i+1, j-1] == 1):
-
-                        br_rh = 0.5 * (br[i, j] + br[i+1, j])
-                        bz_rh = 0.5 * (bz[i, j] + bz[i+1, j])
-                        k_par_rh = 0.5 * (kappa_parallel[i, j] + kappa_parallel[i+1, j])
-                        k_perp_rh = 0.5 * (kappa_perp[i, j] + kappa_perp[i+1, j])
-                        k_a_rh = k_par_rh - k_perp_rh
-                        k_rr_rh = k_perp_rh + k_a_rh * br_rh * br_rh
-                        k_rz_rh = k_a_rh * br_rh * bz_rh
-                        dT_dr_rh = (Te[i+1, j] - Te[i, j]) / dr
-                        dT_dz_rh = (Te[i, j+1] - Te[i, j-1] + Te[i+1, j+1] - Te[i+1, j-1]) / (4.0 * dz)
-                        qr_rh = -(k_rr_rh * dT_dr_rh + k_rz_rh * dT_dz_rh)
-                    else:
-                        # Simple isotropic fallback for messy plasma-plasma edges
-                        k_eff = 0.5 * (kappa_perp[i, j] + kappa_perp[i+1, j])
-                        qr_rh = -k_eff * (Te[i+1, j] - Te[i, j]) / dr
-                
-                else: 
-                    # Neighbor is Masked (Solid). 
-                    # User Req: Bohm ONLY at rmax/zmin. Internal mask -> No Bohm.
-                    # Set conduction to 0.0 (Insulating/Advection dominated).
-                    qr_rh = 0.0
-            
-            # CASE B: Outer Physical Wall (r = rmax)
-            else: 
-                # User Req: Only bohm through sheath here.
-                qr_rh = sheath_flux_mag
-
-            # --- Left face (i-1/2) ---
-            qr_lh = 0.0
-            
-            # CASE A: Internal Interface
-            if i > 0:
-                if mask[i-1, j] == 1:
-                    if (j < NZ-1 and j > 0 and
-                        mask[i, j+1] == 1 and mask[i, j-1] == 1 and
-                        mask[i-1, j+1] == 1 and mask[i-1, j-1] == 1):
-                        
-                        br_lh = 0.5 * (br[i, j] + br[i-1, j])
-                        bz_lh = 0.5 * (bz[i, j] + bz[i-1, j])
-                        k_par_lh = 0.5 * (kappa_parallel[i, j] + kappa_parallel[i-1, j])
-                        k_perp_lh = 0.5 * (kappa_perp[i, j] + kappa_perp[i-1, j])
-                        k_a_lh = k_par_lh - k_perp_lh
-                        k_rr_lh = k_perp_lh + k_a_lh * br_lh * br_lh
-                        k_rz_lh = k_a_lh * br_lh * bz_lh
-                        dT_dr_lh = (Te[i, j] - Te[i-1, j]) / dr
-                        dT_dz_lh = (Te[i, j+1] - Te[i, j-1] + Te[i-1, j+1] - Te[i-1, j-1]) / (4.0 * dz)
-                        qr_lh = -(k_rr_lh * dT_dr_lh + k_rz_lh * dT_dz_lh)
-                    else:
-                        k_eff = 0.5 * (kappa_perp[i, j] + kappa_perp[i-1, j])
-                        qr_lh = -k_eff * (Te[i, j] - Te[i-1, j]) / dr
-                else:
-                    # Neighbor is Masked -> No Bohm.
-                    qr_lh = 0.0 
-            
-            # CASE B: Axis of Symmetry (r = 0)
-            else:
-                qr_lh = 0.0
-
-            # --- Top face (j+1/2) ---
-            qz_th = 0.0
-            
-            # CASE A: Internal Interface
-            if j < NZ - 1:
-                if mask[i, j+1] == 1:
-                    if (i < NR-1 and i > 0 and
-                        mask[i+1, j] == 1 and mask[i-1, j] == 1 and
-                        mask[i+1, j+1] == 1 and mask[i-1, j+1] == 1):
-
-                        br_th = 0.5 * (br[i, j] + br[i, j+1])
-                        bz_th = 0.5 * (bz[i, j] + bz[i, j+1])
-                        k_par_th = 0.5 * (kappa_parallel[i, j] + kappa_parallel[i, j+1])
-                        k_perp_th = 0.5 * (kappa_perp[i, j] + kappa_perp[i, j+1])
-                        k_a_th = k_par_th - k_perp_th
-                        k_zz_th = k_perp_th + k_a_th * bz_th * bz_th
-                        k_rz_th = k_a_th * br_th * bz_th
-                        dT_dz_th = (Te[i, j+1] - Te[i, j]) / dz
-                        dT_dr_th = (Te[i+1, j] - Te[i-1, j] + Te[i+1, j+1] - Te[i-1, j+1]) / (4.0 * dr)
-                        qz_th = -(k_rz_th * dT_dr_th + k_zz_th * dT_dz_th)
-                    else:
-                        k_eff = 0.5 * (kappa_perp[i, j] + kappa_perp[i, j+1])
-                        qz_th = -k_eff * (Te[i, j+1] - Te[i, j]) / dz
-                else:
-                    # Neighbor is Masked -> No Bohm.
-                    qz_th = 0.0
-            
-            # CASE B: Top Boundary (z = zmax)
-            else:
-                # User Req: "at z=zmax no energy flux"
-                qz_th = 0.0
-
-            # --- Bottom face (j-1/2) ---
-            qz_bh = 0.0
-            
-            # CASE A: Internal Interface
-            if j > 0:
-                if mask[i, j-1] == 1:
-                    if (i < NR-1 and i > 0 and
-                        mask[i+1, j] == 1 and mask[i-1, j] == 1 and
-                        mask[i+1, j-1] == 1 and mask[i-1, j-1] == 1):
-
-                        br_bh = 0.5 * (br[i, j] + br[i, j-1])
-                        bz_bh = 0.5 * (bz[i, j] + bz[i, j-1])
-                        k_par_bh = 0.5 * (kappa_parallel[i, j] + kappa_parallel[i, j-1])
-                        k_perp_bh = 0.5 * (kappa_perp[i, j] + kappa_perp[i, j-1])
-                        k_a_bh = k_par_bh - k_perp_bh
-                        k_zz_bh = k_perp_bh + k_a_bh * bz_bh * bz_bh
-                        k_rz_bh = k_a_bh * br_bh * bz_bh
-                        dT_dz_bh = (Te[i, j] - Te[i, j-1]) / dz
-                        dT_dr_bh = (Te[i+1, j] - Te[i-1, j] + Te[i+1, j+1] - Te[i-1, j+1]) / (4.0 * dr)
-                        qz_bh = -(k_rz_bh * dT_dr_bh + k_zz_bh * dT_dz_bh)
-                    else:
-                        k_eff = 0.5 * (kappa_perp[i, j] + kappa_perp[i, j-1])
-                        qz_bh = -k_eff * (Te[i, j] - Te[i, j-1]) / dz
-                else:
-                    # Neighbor is Masked -> No Bohm.
-                    qz_bh = 0.0
-
-            # CASE B: Bottom Physical Wall (z = zmin)
-            else:
-                # User Req: "at z=zmin... bohm"
-                qz_bh = -sheath_flux_mag
-
-
-            # --- Divergence (Conduction) ---
-            r_center = r_vec[i] + 1e-12
-            r_rh_face = r_vec[i] + 0.5 * dr
-            r_lh_face = r_vec[i] - 0.5 * dr
-            
-            term_r = 0.0
-            if i == 0:
-                term_r = (r_rh_face * qr_rh) / (r_center * dr)
-            else:
-                term_r = (r_rh_face * qr_rh - r_lh_face * qr_lh) / (r_center * dr)
-                
-            div_q = term_r + (qz_th - qz_bh) / dz
-
-
-            # =========================
-            # 2. Advection
-            # =========================
-            
-            # NOTE:
-            # - At zmin and rmax: Advection = 0 (Bohm handled separately).
-            # - At internal masked faces: Advection != 0 (Enabled).
-            # - We use Te[i,j] (self) as T_up when the neighbor is a mask.
-
-            # Right face (i+1/2)
-            F_r_rh = 0.0
-            if i < NR - 1:
-                if mask[i+1, j] == 1:
-                    Jr_face = 0.5 * (Jer[i, j] + Jer[i+1, j])
-                    T_up = Te[i+1, j] if Jr_face > 0.0 else Te[i, j]
-                    F_r_rh = -alpha * T_up * Jr_face
-                else:
-                    # Internal Wall -> ENABLE Advection
-                    Jr_face = 0.5 * (Jer[i, j] + Jer[i+1, j])
-                    T_up = Te[i, j] # Use local T for masked interaction
-                    F_r_rh = -alpha * T_up * Jr_face
-            else:
-                # External Wall (rmax) -> User Req: No Advection (Bohm only)
-                F_r_rh = 0.0
-
-            # Left face (i-1/2)
-            F_r_lh = 0.0
-            if i > 0:
-                if mask[i-1, j] == 1:
-                    Jr_face = 0.5 * (Jer[i, j] + Jer[i-1, j])
-                    T_up = Te[i, j] if Jr_face > 0.0 else Te[i-1, j]
-                    F_r_lh = -alpha * T_up * Jr_face
-                else:
-                    # Internal Wall -> ENABLE Advection
-                    Jr_face = 0.5 * (Jer[i, j] + Jer[i-1, j])
-                    T_up = Te[i, j]
-                    F_r_lh = -alpha * T_up * Jr_face
-            else:
-                # Axis
-                F_r_lh = 0.0
-
-            # Top face (j+1/2)
-            F_z_th = 0.0
-            if j < NZ - 1:
-                if mask[i, j+1] == 1:
-                    Jz_face = 0.5 * (Jez[i, j] + Jez[i, j+1])
-                    T_up = Te[i, j+1] if Jz_face > 0.0 else Te[i, j]
-                    F_z_th = -alpha * T_up * Jz_face
-                else:
-                    # Internal Wall -> ENABLE Advection
-                    Jz_face = 0.5 * (Jez[i, j] + Jez[i, j+1])
-                    T_up = Te[i, j]
-                    F_z_th = -alpha * T_up * Jz_face
-            else:
-                # Symmetry / Top Wall (zmax) -> User Req: No energy flux
-                F_z_th = 0.0
-
-            # Bottom face (j-1/2)
-            F_z_bh = 0.0
-            if j > 0:
-                if mask[i, j-1] == 1:
-                    Jz_face = 0.5 * (Jez[i, j] + Jez[i, j-1])
-                    T_up = Te[i, j] if Jz_face > 0.0 else Te[i, j-1]
-                    F_z_bh = -alpha * T_up * Jz_face
-                else:
-                    # Internal Wall -> ENABLE Advection
-                    Jz_face = 0.5 * (Jez[i, j] + Jez[i, j-1])
-                    T_up = Te[i, j]
-                    F_z_bh = -alpha * T_up * Jz_face
-            else:
-                # External Wall (zmin) -> User Req: No Advection (Bohm only)
-                F_z_bh = 0.0
-
-            # Advection Divergence
-            term_adv_r = 0.0
-            if i == 0:
-                term_adv_r = (r_rh_face * F_r_rh) / (r_center * dr)
-            else:
-                term_adv_r = (r_rh_face * F_r_rh - r_lh_face * F_r_lh) / (r_center * dr)
-                
-            div_Fadv = term_adv_r + (F_z_th - F_z_bh) / dz
-            
-            # =========================
-            # 3. Update
-            # =========================
-            rhs = -div_q - div_Fadv + Q_Joule[i, j]
-            dTe_dt = (2.0 / (3.0 * n_e[i, j] * kb)) * rhs
-            Te_new[i, j] = Te[i, j] + dt * dTe_dt
-
 @njit(cache=True)
 def time_advance_ne_analytic_kernel_anisotropic(ne_out, ne_old, 
                                                 nu_iz, nu_loss, nu_RR, beta_rec, 
@@ -781,6 +506,199 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
     return aP, aE, aW, aN, aS, b
 
 
+# Broken, need to fix!
+@numba.jit(nopython=True, parallel=True, cache=True)
+def assemble_Te_advection_diffusion_FD(Te, ne, ur, uz,
+                                     kappa_par, kappa_perp, 
+                                     br, bz, mask, dr, dz, r_coords, dt, 
+                                     mi, closed_top, 
+                                     i_cathode_r, j_cathode_r,
+                                     i_cathode_z, j_cathode_z,
+                                     delta_sheath=1.0):
+    """
+    FD Assembly with Advection-Diffusion.
+    """
+    Nr, Nz = Te.shape
+    kb = 1.380649e-23 # Explicit constant or pass it in
+    
+    # Enthalpy flux factor (5/2). Use 1.5 for Energy flux only.
+    gamma_adv = 2.5 
+    
+    # Initialize Matrices
+    aP = np.zeros((Nr, Nz))
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz))
+    
+    inv_dr = 1.0 / dr
+    inv_dz = 1.0 / dz
+    inv_dr2 = 1.0 / (dr * dr)
+    inv_dz2 = 1.0 / (dz * dz)
+
+    # --- Main Domain Assembly ---
+    for i in numba.prange(Nr):
+        r_loc = r_coords[i]
+        inv_r = 1.0 / (r_loc + 1e-12) 
+        
+        for j in range(Nz):
+            # --- 0. VALIDITY CHECK ---
+            # If current node is Solid/Invalid, do nothing (or Identity)
+            if mask[i, j] == 0:
+                aP[i, j] = 1.0
+                b[i, j]  = Te[i, j]
+                continue
+            
+            # --- 1. SAFE NEIGHBOR LOOKUP ---
+            # We explicitly check bounds first, THEN check the mask.
+            # This prevents IndexError on array edges.
+            
+            # West (i-1)
+            valid_W = False
+            if i > 0:
+                if mask[i-1, j] == 1:
+                    valid_W = True
+
+            # East (i+1)
+            valid_E = False
+            if i < Nr - 1:
+                if mask[i+1, j] == 1:
+                    valid_E = True
+            
+            # South (j-1)
+            valid_S = False
+            if j > 0:
+                if mask[i, j-1] == 1:
+                    valid_S = True
+
+            # North (j+1)
+            valid_N = False
+            if j < Nz - 1:
+                if mask[i, j+1] == 1:
+                    valid_N = True
+            
+            # --- 2. DIFFUSION TERMS (Conductivity) ---
+            k_p = kappa_par[i, j]
+            k_v = kappa_perp[i, j]
+            Br_val = br[i, j]
+            Bz_val = bz[i, j]
+            
+            k_rr = k_v + (k_p - k_v) * Br_val*Br_val
+            k_zz = k_v + (k_p - k_v) * Bz_val*Bz_val
+            
+            geom_fac = 0.5 * dr * inv_r
+            
+            # Diffusion Coefficients (Set to 0 if neighbor invalid)
+            val_E_diff = (k_rr * inv_dr2 * (1.0 + geom_fac)) if valid_E else 0.0
+            val_W_diff = (k_rr * inv_dr2 * (1.0 - geom_fac)) if valid_W else 0.0
+            val_N_diff = (k_zz * inv_dz2) if valid_N else 0.0
+            val_S_diff = (k_zz * inv_dz2) if valid_S else 0.0
+            
+            # --- 3. ADVECTION TERMS (Strict Upwinding) ---
+            # Reset advection accumulators
+            val_E_adv = 0.0
+            val_W_adv = 0.0
+            val_N_adv = 0.0
+            val_S_adv = 0.0
+            div_adv_P = 0.0 
+
+            # EAST FACE (+r)
+            # Only compute if East neighbor is VALID
+            if valid_E:
+                # Safe to access i+1 here
+                u_face = 0.5 * (ur[i, j] + ur[i+1, j])
+                n_face = 0.5 * (ne[i, j] + ne[i+1, j])
+                flux = gamma_adv * n_face * kb * u_face * inv_dr * (1.0 + geom_fac)
+                
+                if flux > 0: div_adv_P += flux        # Flow OUT -> Loss (Diagonal)
+                else:        val_E_adv += -flux       # Flow IN  -> Gain (Neighbor)
+
+            # WEST FACE (-r)
+            if valid_W:
+                u_face = 0.5 * (ur[i, j] + ur[i-1, j])
+                n_face = 0.5 * (ne[i, j] + ne[i-1, j])
+                # Note: normal is -1
+                flux = -1.0 * gamma_adv * n_face * kb * u_face * inv_dr * (1.0 - geom_fac)
+                
+                if flux > 0: div_adv_P += flux
+                else:        val_W_adv += -flux
+
+            # NORTH FACE (+z)
+            if valid_N:
+                u_face = 0.5 * (uz[i, j] + uz[i, j+1])
+                n_face = 0.5 * (ne[i, j] + ne[i, j+1])
+                flux = gamma_adv * n_face * kb * u_face * inv_dz
+                
+                if flux > 0: div_adv_P += flux
+                else:        val_N_adv += -flux
+
+            # SOUTH FACE (-z)
+            if valid_S:
+                u_face = 0.5 * (uz[i, j] + uz[i, j-1])
+                n_face = 0.5 * (ne[i, j] + ne[i, j-1])
+                flux = -1.0 * gamma_adv * n_face * kb * u_face * inv_dz
+                
+                if flux > 0: div_adv_P += flux
+                else:        val_S_adv += -flux
+
+            # --- 4. TIME & BOUNDARIES ---
+            Cv_term = 1.5 * ne[i, j] * kb / dt
+            
+            # Standard Sheath Boundaries (Only if neighbor is NOT valid)
+            # NORTH (Top Wall)
+            if (not valid_N) and (j == Nz - 1 and closed_top):
+                cs = np.sqrt(kb * Te[i, j] / mi)
+                Cv_term += (delta_sheath * ne[i, j] * cs * kb) / dz
+            
+            # SOUTH (Bottom Wall)
+            if (not valid_S) and (j == 0): 
+                cs = np.sqrt(kb * Te[i, j] / mi)
+                Cv_term += (delta_sheath * ne[i, j] * cs * kb) / dz
+
+            # EAST (Outer Wall)
+            if (not valid_E) and (i == Nr - 1):
+                cs = np.sqrt(kb * Te[i, j] / mi)
+                Cv_term += (delta_sheath * ne[i, j] * cs * kb) / dr
+            
+            # --- 5. FINAL ASSEMBLY ---
+            aE[i, j] = val_E_diff + val_E_adv
+            aW[i, j] = val_W_diff + val_W_adv
+            aN[i, j] = val_N_diff + val_N_adv
+            aS[i, j] = val_S_diff + val_S_adv
+            
+            aP[i, j] = Cv_term + div_adv_P + \
+                       val_E_diff + val_W_diff + val_N_diff + val_S_diff
+                       
+            b[i, j] = (1.5 * ne[i, j] * kb / dt) * Te[i, j]
+
+    # --- SPECIAL CATHODE BOUNDARY LOOPS ---
+    # (Kept identical but with extra boundary checks just in case)
+    
+    num_pts_r = len(i_cathode_r)
+    for k in range(num_pts_r):
+        i_c = i_cathode_r[k]
+        j_c = j_cathode_r[k]
+        i_p = i_c + 1 
+        # Strict check: Plasma node must be inside domain AND masked 1
+        if i_p < Nr and mask[i_p, j_c] == 1:
+            cs = np.sqrt(kb * Te[i_p, j_c] / mi)
+            G_sheath = delta_sheath * ne[i_p, j_c] * cs * kb
+            aP[i_p, j_c] += G_sheath / dr 
+
+    num_pts_z = len(i_cathode_z)
+    for k in range(num_pts_z):
+        i_c = i_cathode_z[k]
+        j_c = j_cathode_z[k]
+        j_p = j_c + 1 
+        if j_p < Nz and mask[i_c, j_p] == 1:
+            cs = np.sqrt(kb * Te[i_c, j_p] / mi)
+            G_sheath = delta_sheath * ne[i_c, j_p] * cs * kb
+            aP[i_c, j_p] += G_sheath / dz 
+
+    return aP, aE, aW, aN, aS, b
+
+
 def solve_direct_fast(Nr, Nz, aP, aE, aW, aN, aS, b):
     """
     Vectorized construction of the sparse matrix for A * phi = b.
@@ -868,7 +786,8 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
                               mi, Te_floor,
                               i_cathode_r, j_cathode_r,
                               i_cathode_z, j_cathode_z,
-                              verbose=False, closed_top=False, delta_sheath=1.0):
+                              ur=None, uz=None,
+                              verbose=False, closed_top=False, delta_sheath=1.0, include_advection=False):
     """
     Direct Solver for Anisotropic Electron Heat Diffusion.
     Uses Splu (SuperLU) for robust, instant solution.
@@ -877,14 +796,27 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
     
     # 1. Assemble Coefficients (Numba)
     # We pass 'Te' as the "old" temperature for linearization of non-linear terms (sheath)
-    aP, aE, aW, aN, aS, b = assemble_Te_diffusion_FD(
-        Te, ne, kappa_par, kappa_perp, 
-        br, bz, mask, dr, dz, r_coords, dt, 
-        mi, closed_top,
-        i_cathode_r, j_cathode_r,
-        i_cathode_z, j_cathode_z,
-        delta_sheath=delta_sheath
-    )
+    if(include_advection):
+        if(ur is None or uz is None):
+            print("Error, uer or uez not passed, None values")
+
+        aP, aE, aW, aN, aS, b = assemble_Te_advection_diffusion_FD(Te, ne, ur, uz,
+                                     kappa_par, kappa_perp, 
+                                     br, bz, mask, dr, dz, r_coords, dt, 
+                                     mi, closed_top, 
+                                     i_cathode_r, j_cathode_r,
+                                     i_cathode_z, j_cathode_z,
+                                     delta_sheath=1.0)
+
+    else:
+        aP, aE, aW, aN, aS, b = assemble_Te_diffusion_FD(
+            Te, ne, kappa_par, kappa_perp, 
+            br, bz, mask, dr, dz, r_coords, dt, 
+            mi, closed_top,
+            i_cathode_r, j_cathode_r,
+            i_cathode_z, j_cathode_z,
+            delta_sheath=delta_sheath
+        )
     
     # 2. Direct Solve (Scipy/SuperLU)
     # Uses the same helper you wrote for the Poisson solver
@@ -902,13 +834,6 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
         print(f"[Te-DIRECT] Solved. Max Delta T = {diff:.3f} K")
         
     return Te_new
-
-
-##################################################################################################################
-##################################################################################################################
-####################################### Adding to test Ambipolar diffusion #######################################
-##################################################################################################################
-##################################################################################################################
 
 
 @njit(cache=True)

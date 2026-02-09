@@ -61,11 +61,8 @@ class ElectronFluidContainer:
             u_e = J_e / ( -e * n_e )
         """
         qe = constants.q_e  # electron charge (C)
-
         ne_eff = np.maximum(self.ne_grid, self.ne_floor)  # m^-3 (avoid div-by-zero)
-
         self.uer_grid[:, :] = hybrid_pic.Jer_grid / (-qe * ne_eff)
-        #self.uet_grid[:, :] = hybrid_pic.Jet_grid / (-qe * ne_eff)
         self.uez_grid[:, :] = hybrid_pic.Jez_grid / (-qe * ne_eff)
 
     def update_pressure(self):
@@ -156,131 +153,6 @@ class ElectronFluidContainer:
         self.sigma_H_grid[:]        = sigma_H_e
         self.beta_e_grid[:]         = _beta_e
 
-    def update_Te(self, geom, hybrid_pic, neutral_fluid, particle_container, Ts_host, Q_Joule_grid, dt, p_RF=None):
-        """
-        Update Te function solving energy equation
-        Note: this is an explicit solver with substepping for stability used in first version of code
-        It requires a small timestep.
-        Next version will use semi-implicit solver instead to reduce computational cost.
-        """
-        Te_new = np.zeros_like(self.Te_grid)
-
-        # Effective thermal diffusivity for electrons from parallel conductivity
-        # D_eff = (2/3) * kappa_parallel / (n_e * k_B)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            D_eff = (2.0 * self.kappa_parallel_grid) / (3.0 * self.ne_grid * constants.kb)
-
-        # Zero diffusion where n_e is below floor
-        D_eff = np.where(self.ne_grid < self.ne_floor, 0.0, D_eff)
-
-        # Stable explicit timestep for 2D diffusion-like operator:
-        # dt_stable = 1 / ( 2 * D_max * (1/dr^2 + 1/dz^2) )
-        inv_h2 = (1.0 / geom.dr**2) + (1.0 / geom.dz**2)
-        Dmax = float(np.nanmax(D_eff)) if np.isfinite(D_eff).any() else 0.0
-
-        if Dmax > 0.0 and np.isfinite(Dmax) and inv_h2 > 0.0:
-            dt_stable = 1.0 / (2.0 * Dmax * inv_h2)
-        else:
-            dt_stable = dt  # no diffusion -> no stability restriction
-
-        Q_Joule_grid = np.where(self.ne_grid<self.ne0, 0, Q_Joule_grid)
-        if p_RF is not None:
-            Q_Joule_grid += p_RF
-
-        # Helper to perform one advance with a given local dt
-        def _advance(dt_local):
-            electron_fluid_helper.solve_step(
-                self.Te_grid, Te_new,
-                geom.dr, geom.dz, geom.r,
-                self.ne_grid, Q_Joule_grid,
-                hybrid_pic.br_grid, hybrid_pic.bz_grid,
-                self.kappa_parallel_grid, self.kappa_perp_grid,
-                hybrid_pic.Jer_grid, hybrid_pic.Jez_grid,
-                geom.mask, dt_local, particle_container.m
-            )
-            self.Te_grid[:, :] = Te_new
-
-            self.Te_grid[geom.cathode_mask] = geom.temperature_cathode
-            self.Te_grid[geom.anode1_mask] = geom.temperature_anode
-            self.Te_grid[geom.anode2_mask] = geom.temperature_anode
-
-            # BCs at rmin, rmax, zmin, zmax
-            # Using Neumann here, should change to sheath based model!
-            self.apply_boundary_conditions()
-
-        # Sub-stepping controller
-        if not np.isfinite(dt_stable) or dt_stable <= 0.0:
-            dt_stable = dt
-
-        if dt_stable < dt:
-            # Full sub-steps of size dt_stable
-            n_full = int(dt // dt_stable)
-            t_accum = 0.0
-            for _ in range(n_full):
-                _advance(dt_stable)
-                t_accum += dt_stable
-            # Final remainder (if dt is not an exact multiple)
-            dt_rem = dt - t_accum
-            if dt_rem > 0.0:
-                _advance(dt_rem)
-        else:
-            # Single step with dt
-            _advance(dt)
-
-        # --- Collision energy exchange term uses the full dt (outside of sub-steps) ---
-        self.compute_elastic_collisions_term(geom, neutral_fluid, particle_container, Ts_host, dt)
-
-        self.Te_grid[geom.cathode_mask] = geom.temperature_cathode
-        self.Te_grid[geom.anode1_mask] = geom.temperature_anode
-        self.Te_grid[geom.anode2_mask] = geom.temperature_anode
-
-        self.apply_boundary_conditions()
-
-
-    def compute_elastic_collisions_term(
-        self,
-        geom,
-        neutral_fluid,
-        particle_container,
-        Ts_host,
-        dt,
-        cap=0.1
-    ):
-        """
-        Collisional Energy Exchange
-        - Keeping only neutral gas here.
-        - for collisions with ions should update ion Ti too but using particle ions
-          so might have to move to the drag diffusion part to keep it consistent..
-          It might have to use a much smaller timestep
-        """
-        ne = np.where(self.ne_grid<self.ne_floor,self.ne_floor,self.ne_grid)
-        nn = np.where(neutral_fluid.nn_grid<neutral_fluid.nn_floor, neutral_fluid.nn_floor, neutral_fluid.nn_grid)
-
-        m_ratio_n = constants.m_e/neutral_fluid.mass
-        m_ration_i = constants.m_e/particle_container.m
-        
-        # Substep count so that both nu_ei*dt_sub and nu_en*dt_sub <= cap (as requested)
-        max_nu_dt = 0.0
-        max_nu_dt = max(max_nu_dt, float(np.nanmax(self.nu_en_grid * m_ratio_n * dt)))
-        max_nu_dt = max(max_nu_dt, float(np.nanmax(self.nu_ei_grid * m_ration_i * dt)))
-        n_sub = int(np.ceil(max(1.0, max_nu_dt / cap)))
-        dt_sub = dt / n_sub
-
-        # Subcycling with operator splitting: e–i then e–n each substep
-        for _ in range(n_sub):
-            Q_coll_en = 3 * self.ne_grid * constants.kb * (
-                m_ratio_n * self.nu_en_grid * (self.Te_grid - neutral_fluid.T_n_grid) )
-
-            Q_coll_ei = 3 * self.ne_grid * constants.kb * (
-                m_ration_i * self.nu_ei_grid * (self.Te_grid - Ts_host) )
-
-            de = dt_sub*(Q_coll_en[geom.mask==1] + Q_coll_ei[geom.mask==1]) # J/m^3
-
-            # Write back masked regions
-            self.Te_grid[geom.mask==1] -= de/(3/2*constants.kb*ne[geom.mask==1])
-            neutral_fluid.T_n_grid[geom.mask==1] += dt_sub*Q_coll_en[geom.mask==1]/(3/2*constants.kb*nn[geom.mask==1])
-
-
     # stable version being used. However no diffusion across cells, leading to unphysical jumps in ne
     def update_density_implicit_local(self, geom, ion_fluid, nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt):
         """
@@ -359,7 +231,7 @@ class ElectronFluidContainer:
 
     def update_density_implicit(self, geom, ion_fluid, hybrid_pic,
                                 nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt, 
-                                delta_sheath=1.0, closed_top=True):
+                                delta_sheath=1.0, closed_top=True, include_Bohm=False):
         """
         Updates electron density using Operator Splitting.
         
@@ -415,6 +287,9 @@ class ElectronFluidContainer:
             ion_fluid.m_i,
             constants.kb
         )
+        if(include_Bohm):
+            D_Bohm = 1/16.0*constants.kb*self.Te_grid/(constants.q_e*hybrid_pic.Bmag_grid)
+            Da_perp += D_Bohm
 
         #Get Cathode info
         #i_cathode = geom.i_cathode_z_sheath # Or specific attribute from your geom
@@ -457,120 +332,16 @@ class ElectronFluidContainer:
         
         return dne_chem, dne_boundary
     
-    def update_density_implicit_subcycling(self, geom, ion_fluid, hybrid_pic,
-                                nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, 
-                                nn_grid, 
-                                dt, 
-                                delta_sheath=1.0, closed_top=True):
-        """
-        Updates electron density using Operator Splitting with Sub-Cycling.
-        Only builds transport matrix ONCE per global step.
-        """
-        
-        # 1. Determine Sub-steps
-        max_nu_iz = np.max(nu_iz_grid)
-        if max_nu_iz > 1e-10:
-            dt_suggested = 0.2 / max_nu_iz
-            n_sub = int(np.ceil(dt / dt_suggested))
-        else:
-            n_sub = 1
-            
-        n_sub = min(n_sub, 20)
-        n_sub = max(n_sub, 1)
-        dt_sub = dt / n_sub
-        
-        # Accumulators
-        total_dne_chem = np.zeros_like(self.ne_grid)
-        total_dne_boundary = np.zeros_like(self.ne_grid)
-
-        # ------------------------------------------------------------------
-        # PRE-CALCULATION (Heavy lifting ONCE)
-        # ------------------------------------------------------------------
-        # Since Te/Ti don't change in sub-steps, D is constant.
-        Da_par, Da_perp = electron_fluid_helper.compute_ambipolar_coefficients(
-            self.Te_grid, ion_fluid.Ti_grid, ion_fluid.nu_i_grid,
-            self.beta_e_grid, ion_fluid.beta_i_grid, ion_fluid.m_i, constants.kb
-        )
-
-        rmax_injection = geom.rmax_cathode
-        i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
-        j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
-        
-        # Build the Matrix components A (aP, aE...) just once.
-        # Note: 'b' will be recalculated inside the loop, but the coefficients are fixed.
-        # We pass ne_star just to get the shapes/dummy b, we won't use that b.
-        aP_const, aE, aW, aN, aS, _ = electron_fluid_helper.assemble_ne_diffusion_FV(
-            self.ne_grid, Da_par, Da_perp,
-            geom.mask, geom.dr, geom.dz, geom.r, dt_sub,
-            self.Te_grid, ion_fluid.m_i,
-            i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
-            delta_sheath=delta_sheath, closed_top=closed_top
-        )
-
-        # ---------------- SUBCYCLING LOOP ----------------
-        for k in range(n_sub):
-            
-            # A. Chemistry (Local)
-            ne_star = np.zeros_like(self.ne_grid)
-            nu_loss_dummy = np.zeros_like(self.ne_grid)
-            
-            electron_fluid_helper.time_advance_ne_analytic_kernel_anisotropic(
-                ne_star, self.ne_grid, nu_iz_grid, nu_loss_dummy,      
-                nu_RR_recomb_grid, beta_rec_grid, dt_sub,
-                geom.mask, self.ne_floor
-            )
-
-            # Stability Clamps
-            ne_floor_log = 1e10
-            log_old = np.log10(np.maximum(self.ne_grid, ne_floor_log))
-            log_star = np.log10(np.maximum(ne_star, ne_floor_log))
-            diff = np.clip(log_star - log_old, -0.5, 0.5)
-            ne_star = 10**(log_old + diff)
-            
-            # Neutral Limiter
-            dne_chem_step = ne_star - self.ne_grid
-            max_ionizable = 0.9 * np.maximum(nn_grid - total_dne_chem, 0.0)
-            dne_chem_step = np.where(dne_chem_step > max_ionizable, max_ionizable, dne_chem_step)
-            
-            ne_star = self.ne_grid + dne_chem_step
-            total_dne_chem += dne_chem_step
-
-            # B. Transport (Solve using pre-built coefficients)            
-            aP, aE, aW, aN, aS, b = electron_fluid_helper.assemble_ne_diffusion_FV(
-                ne_star, Da_par, Da_perp,
-                geom.mask, geom.dr, geom.dz, geom.r, dt_sub,
-                self.Te_grid, ion_fluid.m_i,
-                i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
-                delta_sheath=delta_sheath, closed_top=closed_top
-            )
-            
-            ne_final = electron_fluid_helper.solve_direct_fast(
-                self.Nr, self.Nz, aP, aE, aW, aN, aS, b
-            )
-            
-            # C. Boundary Recycling
-            dne_boundary_step = electron_fluid_helper.compute_boundary_recycling_source(
-                ne_final, self.Te_grid, ion_fluid.m_i,
-                geom.mask, geom.dr, geom.dz, geom.r, dt_sub,
-                i_cathode, j_cathode, hybrid_pic.Jiz_grid, 
-                delta_sheath=delta_sheath, closed_top=closed_top
-            )
-            total_dne_boundary += dne_boundary_step
-
-            # Update for next sub-step
-            self.ne_grid = np.maximum(ne_final, self.ne_floor)
-        
-        # ---------------- END SUBCYCLING ----------------
-
-        return total_dne_chem, total_dne_boundary
-
     def update_Te_implicit(self, geom, hybrid_pic, neutral_fluid, ion_fluid, 
                            Q_Joule_e_grid, 
                            delta_E_eV_ionization, dt, 
                            chem_T_array, chem_k_array,
                            q_RF_grid=None,
                            closed_top=False,
-                           delta_sheath=1.0):
+                           delta_sheath=1.0,
+                           include_advection=False,
+                           include_Bohm=False,
+                           speed_limit=5e5):
         """
         Implicit update for Electron Temperature.
         Allows large timesteps by splitting Local Physics and Global Transport.
@@ -613,6 +384,24 @@ class ElectronFluidContainer:
         
         # Update thermal conductivities
         self.set_kappa(hybrid_pic)
+        if(include_Bohm):
+            kappa_perp_Bohm = (1/16.0)*self.ne_grid*self.Te_grid*(constants.kb)**2/(constants.q_e*hybrid_pic.Bmag_grid)
+            self.kappa_perp_grid+=kappa_perp_Bohm
+
+
+        if(include_advection):
+            ur = np.copy(self.uer_grid)
+            uz = np.copy(self.uez_grid)
+
+            u_mag = np.sqrt(ur**2 + uz**2) + 1e-12 # avoid div/0
+            scale_factor = np.minimum(1.0, speed_limit / u_mag)
+
+            ur_clipped = ur * scale_factor
+            uz_clipped = uz * scale_factor
+
+        else:
+            ur = None
+            uz = None
         
         self.Te_grid = electron_fluid_helper.solve_Te_diffusion_direct(
             self.Te_grid,
@@ -632,8 +421,10 @@ class ElectronFluidContainer:
             geom.j_cathode_r,
             geom.i_cathode_z_sheath,
             geom.j_cathode_z_sheath,
+            ur_clipped, uz_clipped,
             closed_top=closed_top,
-            delta_sheath=delta_sheath
+            delta_sheath=delta_sheath,
+            include_advection=include_advection,
         )
 
         
