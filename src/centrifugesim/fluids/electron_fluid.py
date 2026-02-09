@@ -7,14 +7,7 @@ from centrifugesim import constants
 
 class ElectronFluidContainer:
     """
-    Notes:
-        When subcycling electrons, use proper dt for diffusion + Joule heating vs collisions
-        Need to update Te advance due to div(kappa*grad(Te)) term using ADI-Douglas or another
-        implicit / semi implicit algorithm. Using simple Euler here to test but should not use
-        this version for production runs.
-
-        Move diffusion and advection terms to dolfinx!
-        Do advance 
+    update this
     """
     def __init__(self, geom:Geometry, ne0, ne_floor, Te_floor):
 
