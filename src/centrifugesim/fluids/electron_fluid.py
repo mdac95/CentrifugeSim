@@ -108,7 +108,7 @@ class ElectronFluidContainer:
         self.kappa_perp_grid[:, :]     = kappa_perp
 
     def set_electron_collision_frequencies(
-        self, nn_grid, lnLambda=12.0, sigma_en_m2=2.0e-19, geom=None, J_mag=None, Ti=None, mi=None, include_anomalous=False, Te_is_eV=False
+        self, nn_grid, lnLambda=12.0, sigma_en_m2=2.0e-19, geom=None, J_mag=None, Ti=None, mi=None, include_anomalous=False, Te_is_eV=False, k_interp_elastic=None
     ):
         """
         Compute and set electron collision frequencies:
@@ -126,6 +126,13 @@ class ElectronFluidContainer:
         self.nu_en_grid[:] = nu_en_grid
         self.nu_ei_grid[:] = nu_ei_grid
 
+        if(k_interp_elastic is not None):
+            self.nu_en_grid[:]*=0
+            self.nu_en_grid[geom.mask==1] = nn_grid[geom.mask==1]*k_interp_elastic(self.Te_grid[geom.mask==1])
+            self.nu_en_grid[geom.mask==0] = 1e9 # for safety
+
+            self.nu_e_grid = self.nu_en_grid + self.nu_ei_grid
+        
         if include_anomalous:
             nu_anom_grid = electron_fluid_helper.get_anomalous_collision_frequency(
                 self.ne_grid, self.Te_grid, Ti, J_mag, mi
@@ -388,6 +395,8 @@ class ElectronFluidContainer:
             kappa_perp_Bohm = (1/16.0)*self.ne_grid*self.Te_grid*(constants.kb)**2/(constants.q_e*hybrid_pic.Bmag_grid)
             self.kappa_perp_grid+=kappa_perp_Bohm
 
+        ur_clipped = None
+        uz_clipped = None
 
         if(include_advection):
             ur = np.copy(self.uer_grid)
@@ -398,10 +407,6 @@ class ElectronFluidContainer:
 
             ur_clipped = ur * scale_factor
             uz_clipped = uz * scale_factor
-
-        else:
-            ur = None
-            uz = None
         
         self.Te_grid = electron_fluid_helper.solve_Te_diffusion_direct(
             self.Te_grid,
