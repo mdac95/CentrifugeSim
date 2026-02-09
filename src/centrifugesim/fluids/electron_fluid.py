@@ -266,7 +266,7 @@ class ElectronFluidContainer:
         log_star = np.log10(np.maximum(ne_star, ne_floor_log))
         
         diff = log_star - log_old
-        MAX_LOG_STEP = 0.5 
+        MAX_LOG_STEP = 0.05 # was 0.5 before
         diff_clipped = np.clip(diff, -MAX_LOG_STEP, MAX_LOG_STEP)
         
         # Recalculate n_star
