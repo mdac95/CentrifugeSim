@@ -152,6 +152,7 @@ class ElectronFluidContainer:
         self.sigma_P_grid[:]        = sigma_P_e
         self.sigma_H_grid[:]        = sigma_H_e
         self.beta_e_grid[:]         = _beta_e
+        self.beta_e_grid[-1,:] = self.beta_e_grid[-2,:]
 
     # stable version being used. However no diffusion across cells, leading to unphysical jumps in ne
     def update_density_implicit_local(self, geom, ion_fluid, nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt):
@@ -246,13 +247,33 @@ class ElectronFluidContainer:
         ne_star = np.zeros_like(self.ne_grid)
         
         # Disable 0D diffusion loss for this step
-        nu_loss_dummy = np.zeros_like(self.ne_grid) 
+        #nu_loss_dummy = np.zeros_like(self.ne_grid)
+
+        # Geometric Loss Factors
+        R_max = geom.r.max()
+        L_z = geom.z.max() - geom.z.min()
+        
+        inv_Lambda_r_sq = (2.405 / R_max)**2
+        inv_Lambda_z_sq = (np.pi / (2.0 * L_z))**2
+        
+        # Compute Effective Loss Rate (Anisotropic)
+        nu_diff_grid = electron_fluid_helper.compute_ambipolar_loss_rate_anisotropic(
+            self.Te_grid,
+            ion_fluid.Ti_grid,
+            ion_fluid.nu_i_grid,
+            self.beta_e_grid,
+            ion_fluid.beta_i_grid,
+            ion_fluid.m_i,
+            constants.kb,
+            inv_Lambda_z_sq,
+            inv_Lambda_r_sq
+        )
         
         electron_fluid_helper.time_advance_ne_analytic_kernel_anisotropic(
             ne_star,            # Output: n_star
             self.ne_grid,       # Input: n_old
             nu_iz_grid,         
-            nu_loss_dummy,      # <--- DISABLED
+            nu_diff_grid, #nu_loss_dummy,      # <--- DISABLED
             nu_RR_recomb_grid,
             beta_rec_grid,
             dt,
