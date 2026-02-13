@@ -806,7 +806,7 @@ def solve_Te_diffusion_direct(Te, ne, kappa_par, kappa_perp,
                                      mi, closed_top, 
                                      i_cathode_r, j_cathode_r,
                                      i_cathode_z, j_cathode_z,
-                                     delta_sheath=1.0)
+                                     delta_sheath=delta_sheath)
 
     else:
         aP, aE, aW, aN, aS, b = assemble_Te_diffusion_FD(
@@ -995,48 +995,182 @@ def assemble_ne_diffusion_FV(ne_star, Da_par, Da_perp,
 @njit(cache=True)
 def compute_boundary_recycling_source(ne_new, Te, mi, mask, 
                                       dr, dz, r_coords, dt, 
-                                      i_cathode, j_cathode, Jiz_grid,
+                                      i_cathode, j_cathode, viz,
                                       delta_sheath=1.0, closed_top=True):
     """
-    Calculates neutral source from wall recycling.
+    Calculates neutral source. Matches the Matrix Sink logic (Free Outflow at Cathode).
     """
     Nr, Nz = ne_new.shape
     dne_src = np.zeros((Nr, Nz))
     kb = constants.kb
-    qe = constants.q_e
     
     inv_dr = 1.0 / dr
     inv_dz = 1.0 / dz
     
-    # 1. Standard Bohm Recycling (Outer Walls)
+    # 1. Outer Walls (Bohm)
     for i in range(Nr):
         for j in range(Nz):
             if mask[i, j] == 0: continue
-                
             cs = np.sqrt(kb * Te[i, j] / mi)
             flux_mag = delta_sheath * ne_new[i, j] * cs
             
-            if j == 0:
-                dne_src[i, j] += flux_mag * dt * inv_dz
-            if j == Nz-1 and closed_top:
-                dne_src[i, j] += flux_mag * dt * inv_dz
-            if i == Nr-1:
-                dne_src[i, j] += flux_mag * dt * inv_dr
+            if j == 0: dne_src[i, j] += flux_mag * dt * inv_dz
+            if j == Nz-1 and closed_top: dne_src[i, j] += flux_mag * dt * inv_dz
+            if i == Nr-1: dne_src[i, j] += flux_mag * dt * inv_dr
 
-    """
-    # 2. Cathode Recycling (Bohm Flux)
+    # 2. Cathode (Free Outflow / Drift)
     for k in range(len(i_cathode)):
         i = i_cathode[k]
         j = j_cathode[k]
         
         if i < Nr and j < Nz and mask[i, j] == 1:
-            cs = np.sqrt(kb * Te[i, j] / mi)
-            
-            # Flux = delta * n * cs
-            flux_mag = delta_sheath * ne_new[i, j] * cs
-            
-            # Add neutrals to this cell
-            dne_src[i, j] += flux_mag * dt * inv_dz
-    """
+            # Check direction (Into Cathode)
+            if viz[i, j] < 0.0:
+                # Flux = n * |v_z|
+                flux_mag = ne_new[i, j] * abs(viz[i, j])
+                dne_src[i, j] += flux_mag * dt * inv_dz
 
     return dne_src
+
+########################### Try advection solver ###############################
+
+@njit(cache=True)
+def assemble_ne_advection_diffusion_FV(ne_star, 
+                                       vir, viz,          
+                                       Da_par, Da_perp,   
+                                       mask, dr, dz, r_coords, dt, 
+                                       Te, mi, 
+                                       i_cathode, j_cathode,
+                                       delta_sheath=1.0, 
+                                       closed_top=True):
+    """
+    Assembles Advection-Diffusion Matrix.
+    CATHODE BC: Uses 'Free Outflow' (Drift Velocity) to prevent density drop.
+    """
+    Nr, Nz = ne_star.shape
+    kb = constants.kb
+    
+    aP = np.zeros((Nr, Nz))
+    aE = np.zeros((Nr, Nz))
+    aW = np.zeros((Nr, Nz))
+    aN = np.zeros((Nr, Nz))
+    aS = np.zeros((Nr, Nz))
+    b  = np.zeros((Nr, Nz))
+    
+    # Cathode Map
+    cathode_flag = np.zeros((Nr, Nz), dtype=np.int32)
+    for k in range(len(i_cathode)):
+        ic, jc = i_cathode[k], j_cathode[k]
+        if ic < Nr and jc < Nz:
+            cathode_flag[ic, jc] = 1
+
+    for i in range(Nr):
+        r_i = r_coords[i]
+        
+        # Geometry setup
+        if i == 0: 
+            r_edge = 0.5 * dr
+            Vol = np.pi * r_edge**2 * dz
+            Area_E = 2.0 * np.pi * r_edge * dz
+            Area_W = 0.0 
+            Area_N = np.pi * r_edge**2
+            Area_S = np.pi * r_edge**2
+            dist_E = dr
+            dist_W = 1.0 
+        else:
+            Vol = 2.0 * np.pi * r_i * dr * dz
+            r_east = r_i + 0.5*dr
+            r_west = r_i - 0.5*dr
+            Area_E = 2.0 * np.pi * r_east * dz
+            Area_W = 2.0 * np.pi * r_west * dz
+            Area_N = 2.0 * np.pi * r_i * dr
+            Area_S = 2.0 * np.pi * r_i * dr
+            dist_E, dist_W = dr, dr
+            
+        dist_N, dist_S = dz, dz
+        
+        for j in range(Nz):
+            if mask[i, j] == 0:
+                aP[i, j] = 1.0
+                b[i, j] = ne_star[i, j]
+                continue
+            
+            # --- Transport Coefficients ---
+            D_par_loc = Da_par[i, j]
+            D_perp_loc = Da_perp[i, j]
+            
+            # --- EAST FACE (i -> i+1) ---
+            if i < Nr-1 and mask[i+1, j] == 1:
+                # Diffusion
+                D_face = 0.5 * (D_perp_loc + Da_perp[i+1, j])
+                diff_cond = D_face * Area_E / dist_E
+                aP[i, j] += diff_cond
+                aE[i, j] += diff_cond
+                # Advection
+                u_face = 0.5 * (vir[i, j] + vir[i+1, j])
+                flow = u_face * Area_E
+                if flow > 0: aP[i, j] += flow
+                else:        aE[i, j] -= flow
+
+            # --- WEST FACE (i-1 -> i) ---
+            if i > 0 and mask[i-1, j] == 1:
+                # Diffusion
+                D_face = 0.5 * (D_perp_loc + Da_perp[i-1, j])
+                diff_cond = D_face * Area_W / dist_W
+                aP[i, j] += diff_cond
+                aW[i, j] += diff_cond
+                # Advection
+                u_face = 0.5 * (vir[i, j] + vir[i-1, j])
+                flow = u_face * Area_W
+                if flow < 0: aP[i, j] -= flow
+                else:        aW[i, j] += flow
+
+            # --- NORTH FACE (j -> j+1) ---
+            if j < Nz-1 and mask[i, j+1] == 1:
+                # Diffusion
+                D_face = 0.5 * (D_par_loc + Da_par[i, j+1])
+                diff_cond = D_face * Area_N / dist_N
+                aP[i, j] += diff_cond
+                aN[i, j] += diff_cond
+                # Advection
+                u_face = 0.5 * (viz[i, j] + viz[i, j+1])
+                flow = u_face * Area_N
+                if flow > 0: aP[i, j] += flow
+                else:        aN[i, j] -= flow
+
+            # --- SOUTH FACE (j-1 -> j) ---
+            if j > 0 and mask[i, j-1] == 1:
+                # Diffusion
+                D_face = 0.5 * (D_par_loc + Da_par[i, j-1])
+                diff_cond = D_face * Area_S / dist_S
+                aP[i, j] += diff_cond
+                aS[i, j] += diff_cond
+                # Advection
+                u_face = 0.5 * (viz[i, j] + viz[i, j-1])
+                flow = u_face * Area_S
+                if flow < 0: aP[i, j] -= flow
+                else:        aS[i, j] += flow
+
+            # --- BOUNDARY CONDITIONS (Outer Walls) ---
+            cs = np.sqrt(kb * Te[i, j] / mi)
+            
+            if i == Nr-1: aP[i, j] += delta_sheath * cs * Area_E
+            if j == Nz-1 and closed_top: aP[i, j] += delta_sheath * cs * Area_N
+            if j == 0: aP[i, j] += delta_sheath * cs * Area_S
+            
+            # --- CATHODE SINK (Free Outflow Match) ---
+            elif cathode_flag[i, j] == 1:
+                # If velocity is INTO cathode (Down), remove at that velocity.
+                # This matches the physical arrival rate, preventing density pile-up OR drop.
+                if viz[i, j] < 0.0:
+                    v_loss = abs(viz[i, j])
+                    # Optional: Enforce minimum loss if u_z is suspiciously zero?
+                    # v_loss = max(v_loss, 0.01 * cs) 
+                    aP[i, j] += v_loss * Area_S
+
+            # --- Assembly ---
+            inertia = Vol / dt
+            aP[i, j] += inertia
+            b[i, j] = inertia * ne_star[i, j]
+
+    return aP, aE, aW, aN, aS, b

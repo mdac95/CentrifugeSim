@@ -8,7 +8,7 @@ from centrifugesim import constants
 class NeutralFluidContainer:
     """
     """
-    def __init__(self, geom:Geometry, species_list, nn_floor, mass, name, kind, Tn0=0.0, alpha=1.0, min_T_mu_calc=2000.0):
+    def __init__(self, geom:Geometry, species_list, nn_floor, mass, name, kind, Tn0=0.0, alpha=1.0, min_T_mu_calc=2000.0, T_wall=300.0):
 
         self.name = name
 
@@ -34,7 +34,7 @@ class NeutralFluidContainer:
         self.c_v = self.Rgas_over_m/(gamma - 1.0) # J/(kg·K)
         self.cp  = self.c_v + self.Rgas_over_m # J/(kg·K)
 
-        self.T_wall = 300.0  # Default wall temperature in K
+        self.T_wall = T_wall  # Default wall temperature in K
 
         # For ground/excited states
         self.str_states_list = species_list.copy()
