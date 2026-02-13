@@ -353,6 +353,114 @@ class ElectronFluidContainer:
         
         return dne_chem, dne_boundary
     
+    def update_density_implicit_advection(self, geom, ion_fluid, hybrid_pic,
+                                nu_iz_grid, nu_RR_recomb_grid, beta_rec_grid, dt, 
+                                delta_sheath=1.0, closed_top=True, include_Bohm=False):
+        """
+        Updates electron density using Operator Splitting.
+        
+        Returns:
+            dne_chem (Array): Change in density due to Ionization/Recombination only. 
+                              (Use this to update nn everywhere).
+            dne_boundary (Array): Density of neutrals created at walls due to recycling.
+                                  (Add this to nn at boundaries).
+        """
+        
+        # --- PHASE 1: CHEMISTRY (Local Source/Sink) ---
+        ne_star = np.zeros_like(self.ne_grid)
+        
+        # Disable 0D diffusion loss for this step
+        nu_loss_dummy = np.zeros_like(self.ne_grid)
+
+        electron_fluid_helper.time_advance_ne_analytic_kernel_anisotropic(
+            ne_star,            # Output: n_star
+            self.ne_grid,       # Input: n_old
+            nu_iz_grid,         
+            nu_loss_dummy,      # <--- DISABLED
+            nu_RR_recomb_grid,
+            beta_rec_grid,
+            dt,
+            geom.mask,
+            self.ne_floor
+        )
+
+        # Stability: Clamp Log-Space Overshoot
+        ne_floor_log = 1e10
+        log_old = np.log10(np.maximum(self.ne_grid, ne_floor_log))
+        log_star = np.log10(np.maximum(ne_star, ne_floor_log))
+        
+        diff = log_star - log_old
+        MAX_LOG_STEP = 0.05 # was 0.5 before
+        diff_clipped = np.clip(diff, -MAX_LOG_STEP, MAX_LOG_STEP)
+        
+        # Recalculate n_star
+        ne_star = 10**(log_old + diff_clipped)
+        
+        # 1. Calculate Chemistry Delta (for Neutral update)
+        dne_chem = ne_star - self.ne_grid
+
+        # --- PHASE 2: TRANSPORT (Global 2D Diffusion) ---
+        
+        # Diffusion Coefficients
+        Da_par, Da_perp = electron_fluid_helper.compute_ambipolar_coefficients(
+            self.Te_grid,
+            ion_fluid.Ti_grid,
+            ion_fluid.nu_i_grid,
+            self.beta_e_grid,
+            ion_fluid.beta_i_grid,
+            ion_fluid.m_i,
+            constants.kb
+        )
+        if(include_Bohm):
+            D_Bohm = 1/16.0*constants.kb*self.Te_grid/(constants.q_e*hybrid_pic.Bmag_grid)
+            Da_perp += D_Bohm
+
+        #Get Cathode info
+        #i_cathode = geom.i_cathode_z_sheath # Or specific attribute from your geom
+        #j_cathode = geom.j_cathode_z_sheath
+        # Note: Ensure these match the user snippet's definition or pass them in
+        # If geom doesn't store them exactly as user snippet, reconstruct them here:
+        rmax_injection = geom.rmax_cathode
+        i_cathode = (np.arange(geom.Nr)[geom.r <= rmax_injection]).astype(np.int32)
+        j_cathode = ((int(geom.zmax_cathode/geom.dz)+1)*np.ones_like(i_cathode)).astype(np.int32)
+        
+
+        vir = ion_fluid.vi_r_grid*0 # Not using, only ambipolar diffusion (+ Bohm if enabled) in r
+        viz = ion_fluid.vi_z_grid
+
+        # Assemble ADVECTION + DIFFUSION matrix
+        aP, aE, aW, aN, aS, b = electron_fluid_helper.assemble_ne_advection_diffusion_FV(
+            ne_star, 
+            vir, viz,          # Advection
+            Da_par, Da_perp,   # Diffusion
+            geom.mask, geom.dr, geom.dz, geom.r, dt,
+            self.Te_grid, ion_fluid.m_i,
+            i_cathode, j_cathode, 
+            delta_sheath=delta_sheath, closed_top=closed_top
+        )
+
+        # Solve
+        ne_final = electron_fluid_helper.solve_direct_fast(
+            self.Nr, self.Nz, aP, aE, aW, aN, aS, b
+        )
+        
+        self.ne_grid = np.maximum(ne_final, self.ne_floor)
+        
+        # 2. Calculate Boundary Recycling Delta
+        dne_boundary = electron_fluid_helper.compute_boundary_recycling_source(
+            self.ne_grid,
+            self.Te_grid,
+            ion_fluid.m_i,
+            geom.mask,
+            geom.dr, geom.dz, geom.r, dt,
+            i_cathode, j_cathode, 
+            viz,
+            delta_sheath=delta_sheath,
+            closed_top=closed_top
+        )
+        
+        return dne_chem, dne_boundary
+    
     def update_Te_implicit(self, geom, hybrid_pic, neutral_fluid, ion_fluid, 
                            Q_Joule_e_grid, 
                            delta_E_eV_ionization, dt, 
