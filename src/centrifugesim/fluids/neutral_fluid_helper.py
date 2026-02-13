@@ -1226,8 +1226,8 @@ def update_neutral_vtheta_implicit_source(un_theta, vi_theta,
     """
     Nr, Nz = un_theta.shape
     
-    for i in range(Nr):
-        for j in range(Nz):
+    for i in range(1,Nr-1):
+        for j in range(1,Nz-1):
             if mask[i, j] == 1:
                 # 1Local Densities
                 rho_n = nn[i, j] * mn
@@ -1266,8 +1266,8 @@ def update_neutral_vr_implicit_source(un_r, vi_r,
     """
     Nr, Nz = un_r.shape
     
-    for i in range(Nr):
-        for j in range(Nz):
+    for i in range(1,Nr-1):
+        for j in range(1,Nz-1):
             if mask[i, j] == 1:
                 # Local Densities
                 rho_n = nn[i, j] * mn
@@ -1304,8 +1304,8 @@ def update_neutral_vz_implicit_source(un_z, vi_z,
     """
     Nr, Nz = un_z.shape
     
-    for i in range(Nr):
-        for j in range(Nz):
+    for i in range(1,Nr-1):
+        for j in range(1,Nz-1):
             if mask[i, j] == 1:
                 # Local Densities
                 rho_n = nn[i, j] * mn
@@ -1345,8 +1345,8 @@ def update_neutral_temperature_implicit(Tn, Te, Ti, ne, nn,
     coeff_en = 3.0 * (me / mn) * kb
     coeff_in = 3.0 * (mi / mn) * kb
     
-    for i in range(Nr):
-        for j in range(Nz):
+    for i in range(1,Nr-1):
+        for j in range(1,Nz-1):
             if mask[i, j] == 1:
                 
                 # Local variables

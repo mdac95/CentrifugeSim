@@ -60,6 +60,16 @@ class IonFluidContainer:
         self.vi_r_grid[geom.mask==1] = hybrid_pic.Jir_grid[geom.mask==1] / (self.Z * constants.q_e * self.ni_grid[geom.mask==1])
         self.vi_z_grid[geom.mask==1] = hybrid_pic.Jiz_grid[geom.mask==1] / (self.Z * constants.q_e * self.ni_grid[geom.mask==1])
 
+        # Dirichlet at zmin and zmax (applying to ghost cells too)
+        self.vi_z_grid[:,0] = 0.0
+        self.vi_z_grid[:,1] = 0.0
+        self.vi_z_grid[:,-1] = 0.0
+        self.vi_z_grid[:,-2] = 0.0
+
+        self.vi_r_grid[-1,:] = 0.0
+        self.vi_r_grid[-2,:] = 0.0
+        self.vi_r_grid[0,:] = 0.0
+
     def update_vtheta(self, geom, hybrid_pic, neutral_fluid):
         """
         Updates self.vtheta using the algebraic approximation (Drag = JxB).
@@ -139,6 +149,17 @@ class IonFluidContainer:
         )
 
         self.vi_theta_grid[...] = vi_theta_new.copy()
+
+        # Applying BCs including ghost cells
+        self.vi_theta_grid[:,0] = 0.0
+        self.vi_theta_grid[:,1] = 0.0
+        if(closed_top):
+            self.vi_theta_grid[:,-1] = 0.0
+            self.vi_theta_grid[:,-2] = 0.0
+
+        self.vi_theta_grid[-1,:] = 0.0
+        self.vi_theta_grid[-2,:] = 0.0
+
         del vi_theta_new, vi_theta_old
 
 
