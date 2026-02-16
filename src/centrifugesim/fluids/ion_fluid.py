@@ -276,15 +276,15 @@ class IonFluidContainer:
         del Ti_new, Ti_old
 
         # Add friction heating with neutrals in theta
-        ion_fluid_helper.add_friction_heating_theta_kernel(
-            self.Ti_grid,
-            self.vi_theta_grid,
-            neutral_fluid.un_theta_grid,
-            self.nu_i_grid,
-            self.m_i,
-            dt,
-            geom.mask
-        )
+        #ion_fluid_helper.add_friction_heating_theta_kernel(
+        #    self.Ti_grid,
+        #    self.vi_theta_grid,
+        #    neutral_fluid.un_theta_grid,
+        #    self.nu_i_grid,
+        #    self.m_i,
+        #    dt,
+        #    geom.mask
+        #)
 
         # Ensure Neumann BC at cathode
         rmax_injection = geom.rmax_cathode

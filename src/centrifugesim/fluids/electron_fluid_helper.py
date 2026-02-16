@@ -132,7 +132,7 @@ def electron_conductivities(
     sigma_par_e = pref / (nu_e-nu_e_anom)  # subtract anomalous collision freq
     denom = (nu_e*nu_e + Omega_e*Omega_e)
     sigma_P_e = pref * (nu_e / denom)
-    sigma_H_e = - pref * (Omega_e / denom)
+    sigma_H_e = pref * (Omega_e / denom)
 
     return sigma_par_e, sigma_P_e, sigma_H_e, Omega_e/nu_e  # β_e
 

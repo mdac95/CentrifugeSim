@@ -3,6 +3,7 @@ import cupy as cp
 
 from centrifugesim.geometry.geometry import Geometry
 from centrifugesim.field_solver.finite_volume_phi_solver import solve_anisotropic_poisson_FV_direct, compute_E_and_J
+from centrifugesim import constants
 
 class HybridPICModel:
     def __init__(self, geom:Geometry):
@@ -40,6 +41,7 @@ class HybridPICModel:
 
         # electron current density components
         self.Jer_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
+        self.Jet_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
         self.Jez_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
 
         # ion current density components
@@ -98,6 +100,11 @@ class HybridPICModel:
 
         self.Jer_grid[geom.mask==1] = (electron_fluid.sigma_P_grid[geom.mask==1] / (electron_fluid.sigma_P_grid[geom.mask==1] + ion_fluid.sigma_P_grid[geom.mask==1])) * self.Jr_grid[geom.mask==1]
         self.Jez_grid[geom.mask==1] = (electron_fluid.sigma_parallel_grid[geom.mask==1] / (electron_fluid.sigma_parallel_grid[geom.mask==1] + ion_fluid.sigma_parallel_grid[geom.mask==1])) * self.Jz_grid[geom.mask==1]
+
+        self.Jet_grid[geom.mask==1] = (
+            electron_fluid.sigma_H_grid[geom.mask==1] / 
+            electron_fluid.sigma_P_grid[geom.mask==1]
+        ) * self.Jer_grid[geom.mask==1]
 
         self.Jir_grid[geom.mask==1] = self.Jr_grid[geom.mask==1] - self.Jer_grid[geom.mask==1]
         self.Jiz_grid[geom.mask==1] = self.Jz_grid[geom.mask==1] - self.Jez_grid[geom.mask==1]
@@ -214,11 +221,63 @@ class HybridPICModel:
 
         del phi, Er, Ez, Jr, Jz, q_ohm
 
-    def update_Je_Ji_and_compute_DC_power_e_and_i(self, geom, electron_fluid, ion_fluid):
+    def update_Je_Ji_and_compute_DC_power_e_and_i_old(self, geom, electron_fluid, ion_fluid):
         self.update_Je_and_Ji_from_Jtotal(geom, electron_fluid, ion_fluid)
         # compute q_ohm for electrons and ions separately
         self.q_ohm_electrons_grid = self.Jer_grid*self.Er_grid + self.Jez_grid*self.Ez_grid
         self.q_ohm_ions_grid = self.Jir_grid*self.Er_grid + self.Jiz_grid*self.Ez_grid
+
+
+    def update_Je_Ji_and_compute_DC_power_e_and_i(self, geom, electron_fluid, ion_fluid, neutral_fluid):
+        # Update currents from the total current
+        self.update_Je_and_Ji_from_Jtotal(geom, electron_fluid, ion_fluid)
+        
+        # Update electron drift velocities by passing 'self' (the hybrid_pic instance)
+        electron_fluid.update_drift_velocities(self)
+        
+        # 3. Compute 3V squared relative velocities (slip velocities)
+        # Electron-Ion relative velocity squared
+        v_ei_sq = (
+            (electron_fluid.uer_grid - ion_fluid.vi_r_grid)**2 + 
+            (electron_fluid.uet_grid - ion_fluid.vi_theta_grid)**2 + 
+            (electron_fluid.uez_grid - ion_fluid.vi_z_grid)**2
+        )
+        
+        # Electron-Neutral relative velocity squared
+        v_en_sq = (
+            (electron_fluid.uer_grid - neutral_fluid.un_r_grid)**2 + 
+            (electron_fluid.uet_grid - neutral_fluid.un_theta_grid)**2 + 
+            (electron_fluid.uez_grid - neutral_fluid.un_z_grid)**2
+        )
+        
+        # Ion-Neutral relative velocity squared
+        v_in_sq = (
+            (ion_fluid.vi_r_grid - neutral_fluid.un_r_grid)**2 + 
+            (ion_fluid.vi_theta_grid - neutral_fluid.un_theta_grid)**2 + 
+            (ion_fluid.vi_z_grid - neutral_fluid.un_z_grid)**2
+        )
+
+        # Extract masses 
+        m_e = constants.m_e 
+        m_i = ion_fluid.m_i       
+        
+        # Reduced mass for ion-neutral collisions
+        # mu_in = 0.5 * m_i
+        # using value of m_i to put all energy into ions for now.. will change later
+        mu_in = m_i
+
+        # Compute rigorous frictional (Joule) heating rates
+        q_ohm_e = m_e * electron_fluid.ne_grid * (
+            electron_fluid.nu_ei_grid * v_ei_sq + 
+            electron_fluid.nu_en_grid * v_en_sq
+        )
+        
+        q_ohm_i = mu_in * ion_fluid.ni_grid * ion_fluid.nu_i_grid * v_in_sq
+
+        # Update
+        self.q_ohm_electrons_grid = q_ohm_e * geom.mask
+        self.q_ohm_ions_grid = q_ohm_i * geom.mask
+        self.q_ohm_grid = self.q_ohm_electrons_grid + self.q_ohm_ions_grid
         
     # -------- Calculate electrodes currents
     def compute_electrode_currents(self, geom, return_parts=False):
