@@ -60,6 +60,16 @@ class IonFluidContainer:
         self.vi_r_grid[geom.mask==1] = hybrid_pic.Jir_grid[geom.mask==1] / (self.Z * constants.q_e * self.ni_grid[geom.mask==1])
         self.vi_z_grid[geom.mask==1] = hybrid_pic.Jiz_grid[geom.mask==1] / (self.Z * constants.q_e * self.ni_grid[geom.mask==1])
 
+        # Dirichlet at zmin and zmax (applying to ghost cells too)
+        self.vi_z_grid[:,0] = 0.0
+        self.vi_z_grid[:,1] = 0.0
+        self.vi_z_grid[:,-1] = 0.0
+        self.vi_z_grid[:,-2] = 0.0
+
+        self.vi_r_grid[-1,:] = 0.0
+        self.vi_r_grid[-2,:] = 0.0
+        self.vi_r_grid[0,:] = 0.0
+
     def update_vtheta(self, geom, hybrid_pic, neutral_fluid):
         """
         Updates self.vtheta using the algebraic approximation (Drag = JxB).
@@ -139,6 +149,17 @@ class IonFluidContainer:
         )
 
         self.vi_theta_grid[...] = vi_theta_new.copy()
+
+        # Applying BCs including ghost cells
+        self.vi_theta_grid[:,0] = 0.0
+        self.vi_theta_grid[:,1] = 0.0
+        if(closed_top):
+            self.vi_theta_grid[:,-1] = 0.0
+            self.vi_theta_grid[:,-2] = 0.0
+
+        self.vi_theta_grid[-1,:] = 0.0
+        self.vi_theta_grid[-2,:] = 0.0
+
         del vi_theta_new, vi_theta_old
 
 
@@ -255,15 +276,15 @@ class IonFluidContainer:
         del Ti_new, Ti_old
 
         # Add friction heating with neutrals in theta
-        ion_fluid_helper.add_friction_heating_theta_kernel(
-            self.Ti_grid,
-            self.vi_theta_grid,
-            neutral_fluid.un_theta_grid,
-            self.nu_i_grid,
-            self.m_i,
-            dt,
-            geom.mask
-        )
+        #ion_fluid_helper.add_friction_heating_theta_kernel(
+        #    self.Ti_grid,
+        #    self.vi_theta_grid,
+        #    neutral_fluid.un_theta_grid,
+        #    self.nu_i_grid,
+        #    self.m_i,
+        #    dt,
+        #    geom.mask
+        #)
 
         # Ensure Neumann BC at cathode
         rmax_injection = geom.rmax_cathode

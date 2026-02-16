@@ -58,6 +58,21 @@ class ElectronFluidContainer:
         self.uer_grid[:, :] = hybrid_pic.Jer_grid / (-qe * ne_eff)
         self.uez_grid[:, :] = hybrid_pic.Jez_grid / (-qe * ne_eff)
 
+        self.uet_grid[:, :] = (
+            hybrid_pic.Jet_grid / 
+            (- constants.q_e * self.ne_grid)
+        )
+
+        self.uer_grid[-1,:] = 0.0
+        self.uet_grid[-1,:] = 0.0
+
+        self.uez_grid[:,-1] = 0.0
+        self.uez_grid[:,-2] = 0.0
+
+        self.uez_grid[:,0] = 0.0
+        self.uez_grid[:,1] = 0.0
+
+
     def update_pressure(self):
         self.pe_grid = constants.kb*self.Te_grid*self.ne_grid
 
