@@ -624,16 +624,19 @@ def compute_viscous_cross_terms(r, dr, dz, ur, ut, uz, mu_grid, mub_grid, face_r
 
     return Sr, St, Sz
 
+
 @njit(cache=True)
-def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
+def solve_implicit_heat_sor(Tn, nn, mn, mask, anode_mask, anode_T, kappa_grid, c_v,
                             dt, dr, dz, T_wall, T_cathode,
                             i_cath_max, j_cath_max, 
                             max_iter=20, omega=1.4, closed_top=False):
     """
     Implicit neutral temperature diffusion (SOR) with Mixed BCs.
-    Updated to handle Cathode as Conditional BC (Thermostat style):
-    - If T < T_cathode: Dirichlet (T = T_cathode)
-    - If T >= T_cathode: Neumann (No Flux)
+    
+    Updates:
+    - Added 'anode_mask': 0 = Anode, 1 = Fluid
+    - Added 'anode_T': Temperature field for the anode
+    - Checks neighbors: if anode_mask is 0, applies Dirichlet BC using anode_T.
     """
     Nr, Nz = Tn.shape
     inv_dr2 = 1.0 / (dr * dr)
@@ -660,6 +663,8 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
             c_west_base = ((r - 0.5*dr) / r) * inv_dr2
 
             for j in range(1, Nz-1):
+                # Skip if current cell is not Fluid
+                # Note: If mask is 0, it's solid (Wall or Anode). We only solve for Fluid (mask=1).
                 if mask[i, j] != 1:
                     continue
 
@@ -672,20 +677,31 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                 # EAST neighbor
                 # -------------------------
                 if i == Nr-2:
+                    # Outer boundary (Right edge of domain)
+                    val_E = T_wall
+                    c_east = 2.0 * c_east_base
+                elif anode_mask[i+1, j] == 0:
+                    # CHECK ANODE FIRST
+                    val_E = anode_T[i+1, j]
+                    c_east = 2.0 * c_east_base
+                elif mask[i+1, j] == 0:
+                    # THEN CHECK STANDARD WALL
                     val_E = T_wall
                     c_east = 2.0 * c_east_base
                 else:
-                    if mask[i+1, j] == 0:
-                        val_E = T_wall
-                        c_east = 2.0 * c_east_base
-                    else:
-                        val_E = Tn[i+1, j]
-                        c_east = c_east_base
+                    # FLUID
+                    val_E = Tn[i+1, j]
+                    c_east = c_east_base
 
                 # -------------------------
                 # WEST neighbor
                 # -------------------------
-                if mask[i-1, j] == 0:
+                if anode_mask[i-1, j] == 0:
+                    # CHECK ANODE FIRST
+                    val_W = anode_T[i-1, j]
+                    c_west = 2.0 * c_west_base
+                elif mask[i-1, j] == 0:
+                    # THEN CHECK STANDARD WALL
                     val_W = T_wall
                     c_west = 2.0 * c_west_base
                 else:
@@ -696,7 +712,11 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                 # NORTH neighbor (z)
                 # -------------------------
                 if j == Nz - 2:
-                    if mask[i, j+1] == 0: 
+                    # Top domain boundary
+                    if anode_mask[i, j+1] == 0:
+                         val_N = anode_T[i, j+1]
+                         c_north = 2.0 * inv_dz2
+                    elif mask[i, j+1] == 0: 
                         val_N = T_wall
                         c_north = 2.0 * inv_dz2
                     elif closed_top:
@@ -706,10 +726,14 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                         val_N = 0.0
                         c_north = 0.0
                 
+                elif anode_mask[i, j+1] == 0:
+                    # CHECK ANODE FIRST
+                    val_N = anode_T[i, j+1]
+                    c_north = 2.0 * inv_dz2
                 elif mask[i, j+1] == 0:
+                    # THEN CHECK STANDARD WALL
                     val_N = T_wall
                     c_north = 2.0 * inv_dz2
-                
                 else:
                     val_N = Tn[i, j+1]
                     c_north = inv_dz2
@@ -717,22 +741,24 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
                 # -------------------------
                 # SOUTH neighbor (z)
                 # -------------------------
-                # CATHODE CONDITIONAL LOGIC
+                # CATHODE CONDITIONAL LOGIC (Takes precedence if active)
                 if (j - 1 == j_cath_max) and (i <= i_cath_max):
-                    # Check if the current node temperature is below the cathode target
                     if Tn[i, j] < T_cathode:
-                        # Too cold -> Dirichlet BC (Heat it up)
                         val_S = T_cathode
                         c_south = 2.0 * inv_dz2
                     else:
-                        # Hot enough -> Neumann BC (No Flux / Insulate)
                         val_S = 0.0 
                         c_south = 0.0
 
                 elif j == 1:
                     val_S = T_wall
                     c_south = 2.0 * inv_dz2
+                elif anode_mask[i, j-1] == 0:
+                    # CHECK ANODE FIRST
+                    val_S = anode_T[i, j-1]
+                    c_south = 2.0 * inv_dz2
                 elif mask[i, j-1] == 0:
+                    # THEN CHECK STANDARD WALL
                     val_S = T_wall
                     c_south = 2.0 * inv_dz2
                 else:
@@ -762,6 +788,7 @@ def solve_implicit_heat_sor(Tn, nn, mn, mask, kappa_grid, c_v,
 
         if max_diff < 1e-5:
             break
+
 
 @njit(cache=True)
 def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,

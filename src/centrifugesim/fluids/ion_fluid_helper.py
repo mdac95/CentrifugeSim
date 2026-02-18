@@ -947,24 +947,74 @@ def solve_heat_conduction_sor_kernel(Ti, Ti_old, ni, k_par, k_perp, br, bz, mask
             
     return max_diff
 
-def add_friction_heating_theta_kernel(Ti, vi_theta, un_theta, nu_in, mi, dt, mask):
-    """
-    Adds heating due to ion-neutral friction in the azimuthal direction.
-    Q_friction = mi * ni * nu_in * (vi_theta - un_theta)^2
-    dT = (2/3) * (Q_friction / (ni * kb)) * dt
-    All to ions (should partition 1/2 to ions and 1/2 to neutrals but making all to ions for now)
-    """
-    Nr, Nz = Ti.shape
-    kb = constants.kb
-    
-    # Pre-calculate constant factor
-    # (2/3) * (mi / kb)
-    factor = (2.0 * mi) / (3.0 * kb)
 
-    for i in range(Nr):
-        for j in range(Nz):
+@njit(cache=True)
+def compute_viscous_heating_Q_kernel(Q_visc_out, vtheta, eta, mask, r_coords, dr, dz):
+    """
+    Computes viscous heating power density (W/m^3).
+    
+    Includes a 'wall proximity check': 
+    If a cell is within 2 nodes of a solid (mask=0), heating is set to 0.0
+    to prevent numerical spikes from unresolved boundary layers (e.g. cathode sheath).
+    """
+    Nr, Nz = Q_visc_out.shape
+    inv_2dr = 1.0 / (2.0 * dr)
+    inv_2dz = 1.0 / (2.0 * dz)
+    
+    # Distance to suppress heating near walls
+    pad = 2 
+
+    for i in range(1, Nr - 1):
+        r = r_coords[i]
+        
+        if r <= 1e-12:
+            continue
+
+        for j in range(1, Nz - 1):
             if mask[i, j] == 1:
-                v_diff = vi_theta[i, j] - un_theta[i, j]
-                # Note: ni cancels out in the temperature update equation
-                dT = factor * nu_in[i, j] * (v_diff * v_diff)
-                Ti[i, j] += dT * dt
+                
+                # --- 0. Wall Proximity Check ---
+                # Scan neighbors [i-pad, i+pad] to see if any are solid (0)
+                is_near_wall = False
+                
+                # Define search bounds safely
+                i_start = max(0, i - pad)
+                i_end   = min(Nr, i + pad + 1)
+                j_start = max(0, j - pad)
+                j_end   = min(Nz, j + pad + 1)
+
+                for ii in range(i_start, i_end):
+                    for jj in range(j_start, j_end):
+                        if mask[ii, jj] == 0:
+                            is_near_wall = True
+                            break
+                    if is_near_wall:
+                        break
+                
+                # If near wall, suppress heating to 0 and skip calculation
+                if is_near_wall:
+                    Q_visc_out[i, j] = 0.0
+                    continue
+
+                # --- 1. Axial Shear (dv/dz) ---
+                dv_dz = (vtheta[i, j+1] - vtheta[i, j-1]) * inv_2dz
+                
+                # --- 2. Radial Shear r * d/dr(v/r) ---
+                r_ip = r_coords[i+1]
+                val_ip = vtheta[i+1, j] / r_ip
+                
+                # Singularity Handler for i=1
+                if i == 1:
+                    val_im = vtheta[i, j] / r
+                else:
+                    r_im = r_coords[i-1]
+                    val_im = vtheta[i-1, j] / r_im
+                    
+                term_r = r * (val_ip - val_im) * inv_2dr
+                
+                # --- 3. Total Viscous Power ---
+                Phi = (term_r * term_r) + (dv_dz * dv_dz)
+                Q_visc_out[i, j] = eta[i, j] * Phi
+                
+            else:
+                Q_visc_out[i, j] = 0.0
