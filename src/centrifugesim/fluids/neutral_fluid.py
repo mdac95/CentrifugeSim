@@ -402,7 +402,7 @@ class NeutralFluidContainer:
         self.kappa_grid[:,:] = kappa_val
 
         # Thermal Conduction
-        neutral_fluid_helper.solve_implicit_heat_sor(
+        neutral_fluid_helper.solve_implicit_heat_sor_robin_anode(
             self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.geom.anode_mask, self.geom.anode_T_field, self.kappa_grid, self.c_v,
             dt, dr, dz, self.T_wall, self.geom.temperature_cathode, self.geom.i_cath_max, self.geom.j_cath_max,
             max_iter=max_iter_sor, omega=1.8,
