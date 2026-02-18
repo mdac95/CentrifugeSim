@@ -379,13 +379,14 @@ class NeutralFluidContainer:
         dt_heat_limit = visc_safety_factor * dz_sq / (max_nu)
         n_heat_steps = int(np.ceil(dt / dt_heat_limit))
         dt_heat_sub = dt / n_heat_steps
+
         # Sub-cycle
         for _ in range(n_heat_steps):
             neutral_fluid_helper.add_viscous_heating(
                 self.T_n_grid, self.rho_grid,
                 self.un_r_grid, self.un_theta_grid, self.un_z_grid,
                 self.mu_grid, self.c_v,
-                dr, dz, dt_heat_sub, # Use substep dt
+                dr, dz, dt_heat_sub,
                 self.fluid, self.face_r, self.face_z
             )
             apply_bc_temp(closed_top=closed_top)
@@ -402,7 +403,7 @@ class NeutralFluidContainer:
 
         # Thermal Conduction
         neutral_fluid_helper.solve_implicit_heat_sor(
-            self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.kappa_grid, self.c_v,
+            self.T_n_grid, self.nn_grid, self.mass, self.fluid, self.geom.anode_mask, self.geom.anode_T_field, self.kappa_grid, self.c_v,
             dt, dr, dz, self.T_wall, self.geom.temperature_cathode, self.geom.i_cath_max, self.geom.j_cath_max,
             max_iter=max_iter_sor, omega=1.8,
             closed_top=closed_top
@@ -420,18 +421,15 @@ class NeutralFluidContainer:
         self.kappa_grid[:,:] = kappa_val
 
         # Calculate Bulk Viscosity (Physical + Artificial)
-        # Using the logic from your old 'step_isothermal'
         # mub_eff = mub + 0.02 * rho * c_iso * h
         
         # Grid spacing h
         h = min(geom.dr, geom.dz) 
         
         # Physical Bulk Viscosity (if any, typically 0 for monoatomic, but let's allow a placeholder)
-        # If you have a physical value, add it here. For now assuming 0 physical.
         mub_physical = 0.0 
         
         # Artificial Bulk Viscosity
-        # Note: c_iso is passed to this function
         mub_grid = mub_physical + 0.02 * self.rho_grid * c_iso * h
         
         # Mask solids
@@ -462,13 +460,13 @@ class NeutralFluidContainer:
             dt, dr, dz, max_iter=max_iter_sor, omega=1.8, closed_top=closed_top
         )
 
-        # Solve Radial (Pass Sr)
+        # Solve Radial
         neutral_fluid_helper.solve_implicit_viscosity_r_sor(
             self.un_r_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, Sr,
             dt, dr, dz, max_iter=max_iter_sor, omega=1.8, closed_top=closed_top
         )
         
-        # Solve Axial (Pass Sz)
+        # Solve Axial
         neutral_fluid_helper.solve_implicit_viscosity_z_sor(
             self.un_z_grid, self.nn_grid, self.mass, self.mask_vel, self.mu_grid, Sz,
             dt, dr, dz, max_iter=max_iter_sor, omega=1.8

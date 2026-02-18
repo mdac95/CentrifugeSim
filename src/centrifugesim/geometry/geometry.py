@@ -89,6 +89,10 @@ class Geometry:
         self.anode_mask = np.ones((self.Nr, self.Nz), dtype=np.int8)
         self.anode_mask[self.anode1_mask] = 0
         self.anode_mask[self.anode2_mask] = 0
+
+        self.anode_T_field = np.zeros((self.Nr, self.Nz), dtype=np.float64)
+        self.anode_T_field[self.anode_mask==0] = temperature_anode
+
         self.i_anode_bc_list, self.j_anode_bc_list = self.find_boundary_nodes(mask=self.anode_mask)
 
         # Cathode and anode temperatures

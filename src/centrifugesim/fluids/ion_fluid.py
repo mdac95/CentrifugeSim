@@ -235,14 +235,21 @@ class IonFluidContainer:
         self.eta_0[geom.mask==1] = 0.96 * self.ni_grid[geom.mask==1] * constants.kb * self.Ti_grid[geom.mask==1] / self.nu_i_grid[geom.mask==1]
 
     def update_temperature(self, geom, neutral_fluid, electron_fluid, hybrid_pic, dt):
+        self.eta_0[:int(geom.rmax_cathode/geom.dr),int(geom.zmax_cathode/geom.dz)+1] = self.eta_0[:int(geom.rmax_cathode/geom.dr),int(geom.zmax_cathode/geom.dz)+2]
+
         Ti_new = np.zeros_like(self.Ti_grid)
         Ti_old = self.Ti_grid.copy()
+
+        P_visc_out = np.zeros_like(self.Ti_grid)
+        ion_fluid_helper.compute_viscous_heating_Q_kernel(P_visc_out, self.vi_theta_grid, self.eta_0, geom.mask, geom.r, geom.dr, geom.dz)
+
+        P_total_ions = P_visc_out + hybrid_pic.q_ohm_ions_grid
         ion_fluid_helper.update_Ti_joule_heating_implicit_kernel(
             Ti_new,                       # Output
             Ti_old,                       # Input: Old Temperature
             neutral_fluid.T_n_grid,       # Input: Neutral Temp
             electron_fluid.Te_grid,       # Input: Electron Temp
-            hybrid_pic.q_ohm_ions_grid,   # Input: Joule Heating Power (W/m^3)
+            P_total_ions,                 # Input: Joule Heating Power + viscous stress power (W/m^3)
             self.ni_grid,                 # Input: Ion Density
             self.nu_i_grid,               # Input: Ion-Neutral Freq
             electron_fluid.nu_ei_grid,    # Input: Electron-Ion Freq
@@ -274,17 +281,6 @@ class IonFluidContainer:
         )
         self.Ti_grid[...] = Ti_new.copy()
         del Ti_new, Ti_old
-
-        # Add friction heating with neutrals in theta
-        #ion_fluid_helper.add_friction_heating_theta_kernel(
-        #    self.Ti_grid,
-        #    self.vi_theta_grid,
-        #    neutral_fluid.un_theta_grid,
-        #    self.nu_i_grid,
-        #    self.m_i,
-        #    dt,
-        #    geom.mask
-        #)
 
         # Ensure Neumann BC at cathode
         rmax_injection = geom.rmax_cathode
