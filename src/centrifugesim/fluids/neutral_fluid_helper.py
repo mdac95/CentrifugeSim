@@ -1010,6 +1010,229 @@ def solve_implicit_heat_sor_robin_anode(Tn, nn, mn, mask, anode_mask, anode_T, k
 
 
 @njit(cache=True)
+def solve_implicit_heat_sor_robin_anode_cathode(Tn, nn, mn, mask, anode_mask, anode_T, kappa_grid, c_v,
+                            dt, dr, dz, T_wall, T_cathode,
+                            i_cath_max, j_cath_max, 
+                            max_iter=20, omega=1.4, closed_top=False,
+                            accommodation_coeff=0.6):
+    """
+    Implicit neutral temperature diffusion (SOR) with Mixed BCs.
+    
+    UPDATES:
+    1. Robin BC at Anode (Anode Mask).
+    2. Robin BC at Cathode Side (Vertical wall at i_cath_max).
+       - Uses T_wall as the target (not T_cathode).
+       - Allows thermal slip (Temperature Jump).
+    """
+    Nr, Nz = Tn.shape
+    inv_dr2 = 1.0 / (dr * dr)
+    inv_dz2 = 1.0 / (dz * dz)
+    
+    # Physics constants for Robin BC
+    kB = 1.380649e-23
+    pi = 3.141592653589793
+
+    Tn_old = Tn.copy()
+
+    for it in range(max_iter):
+
+        # Axis symmetry
+        for j in range(Nz):
+            if mask[0, j] == 1:
+                Tn[0, j] = Tn[1, j]
+
+        max_diff = 0.0
+
+        # interior only 
+        for i in range(1, Nr-1):
+            r = i * dr
+            if r <= 0.0: continue
+
+            c_east_base = ((r + 0.5*dr) / r) * inv_dr2
+            c_west_base = ((r - 0.5*dr) / r) * inv_dr2
+
+            for j in range(1, Nz-1):
+                # Skip solids
+                if mask[i, j] != 1:
+                    continue
+
+                kappa_val = kappa_grid[i, j]
+                rho = nn[i, j] * mn
+                Cv_vol = rho * c_v
+                A_time = Cv_vol / dt
+
+                # Pre-calculate local gas params for Robin BC
+                T_loc = Tn[i, j]
+                if T_loc < 10.0: T_loc = 10.0
+                
+                # Thermal velocity
+                v_th = np.sqrt(8.0 * kB * T_loc / (pi * mn))
+                
+                # Heat Transfer Coeff
+                h_eff = 0.25 * nn[i, j] * v_th * accommodation_coeff * kB
+                if h_eff < 1e-30: h_eff = 1e-30
+
+                # -------------------------
+                # EAST neighbor
+                # -------------------------
+                if i == Nr-2: 
+                    val_E = T_wall
+                    c_east = 2.0 * c_east_base
+                elif anode_mask[i+1, j] == 0:
+                    # --- ROBIN BC (ANODE) ---
+                    val_E = anode_T[i+1, j]
+                    c_dirichlet = 2.0 * c_east_base
+                    
+                    dist = 0.5 * dr
+                    R_cond = dist / kappa_val
+                    R_jump = 1.0 / h_eff
+                    scale = R_cond / (R_cond + R_jump)
+                    
+                    c_east = c_dirichlet * scale
+                    
+                elif mask[i+1, j] == 0: 
+                    val_E = T_wall
+                    c_east = 2.0 * c_east_base
+                else: 
+                    val_E = Tn[i+1, j]
+                    c_east = c_east_base
+
+                # -------------------------
+                # WEST neighbor
+                # -------------------------
+                if anode_mask[i-1, j] == 0:
+                    # --- ROBIN BC (ANODE) ---
+                    val_W = anode_T[i-1, j]
+                    c_dirichlet = 2.0 * c_west_base
+                    
+                    dist = 0.5 * dr
+                    R_cond = dist / kappa_val
+                    R_jump = 1.0 / h_eff
+                    scale = R_cond / (R_cond + R_jump)
+                    
+                    c_west = c_dirichlet * scale
+
+                elif (i - 1 <= i_cath_max) and (j <= j_cath_max):
+                    # --- ROBIN BC (CATHODE SIDE) ---
+                    # Target: T_wall (as requested)
+                    val_W = T_wall
+                    
+                    c_dirichlet = 2.0 * c_west_base
+                    
+                    dist = 0.5 * dr
+                    R_cond = dist / kappa_val
+                    R_jump = 1.0 / h_eff
+                    scale = R_cond / (R_cond + R_jump)
+                    
+                    c_west = c_dirichlet * scale
+
+                elif mask[i-1, j] == 0:
+                    # Standard Wall Dirichlet
+                    val_W = T_wall
+                    c_west = 2.0 * c_west_base
+                else:
+                    val_W = Tn[i-1, j]
+                    c_west = c_west_base
+
+                # -------------------------
+                # NORTH neighbor
+                # -------------------------
+                if j == Nz - 2:
+                    if anode_mask[i, j+1] == 0:
+                         val_N = anode_T[i, j+1]
+                         c_dirichlet = 2.0 * inv_dz2
+                         R_cond = (0.5 * dz) / kappa_val
+                         R_jump = 1.0 / h_eff
+                         c_north = c_dirichlet * (R_cond / (R_cond + R_jump))
+                    elif mask[i, j+1] == 0: 
+                        val_N = T_wall
+                        c_north = 2.0 * inv_dz2
+                    elif closed_top:
+                        val_N = T_wall
+                        c_north = 2.0 * inv_dz2
+                    else:
+                        val_N = 0.0
+                        c_north = 0.0
+                
+                elif anode_mask[i, j+1] == 0:
+                    # --- ROBIN BC (ANODE) ---
+                    val_N = anode_T[i, j+1]
+                    c_dirichlet = 2.0 * inv_dz2
+                    
+                    dist = 0.5 * dz
+                    R_cond = dist / kappa_val
+                    R_jump = 1.0 / h_eff
+                    scale = R_cond / (R_cond + R_jump)
+                    
+                    c_north = c_dirichlet * scale
+
+                elif mask[i, j+1] == 0:
+                    val_N = T_wall
+                    c_north = 2.0 * inv_dz2
+                else:
+                    val_N = Tn[i, j+1]
+                    c_north = inv_dz2
+
+                # -------------------------
+                # SOUTH neighbor
+                # -------------------------
+                if (j - 1 == j_cath_max) and (i <= i_cath_max):
+                    # Cathode TOP Logic (unchanged - thermostat)
+                    if Tn[i, j] < T_cathode:
+                        val_S = T_cathode
+                        c_south = 2.0 * inv_dz2
+                    else:
+                        val_S = 0.0 
+                        c_south = 0.0
+
+                elif j == 1:
+                    val_S = T_wall
+                    c_south = 2.0 * inv_dz2
+                    
+                elif anode_mask[i, j-1] == 0:
+                    # --- ROBIN BC (ANODE) ---
+                    val_S = anode_T[i, j-1]
+                    c_dirichlet = 2.0 * inv_dz2
+                    
+                    dist = 0.5 * dz
+                    R_cond = dist / kappa_val
+                    R_jump = 1.0 / h_eff
+                    scale = R_cond / (R_cond + R_jump)
+                    
+                    c_south = c_dirichlet * scale
+
+                elif mask[i, j-1] == 0:
+                    val_S = T_wall
+                    c_south = 2.0 * inv_dz2
+                else:
+                    val_S = Tn[i, j-1]
+                    c_south = inv_dz2
+
+                # -------------------------
+                # SOR UPDATE
+                # -------------------------
+                A_P = A_time + kappa_val * (c_east + c_west + c_north + c_south)
+
+                RHS = (A_time * Tn_old[i, j]) + kappa_val * (
+                    c_east  * val_E +
+                    c_west  * val_W +
+                    c_north * val_N +
+                    c_south * val_S
+                )
+
+                T_star = RHS / A_P
+                T_new = (1.0 - omega) * Tn[i, j] + omega * T_star
+
+                diff = abs(T_new - Tn[i, j])
+                if diff > max_diff:
+                    max_diff = diff
+
+                Tn[i, j] = T_new
+
+        if max_diff < 1e-5:
+            break
+
+@njit(cache=True)
 def solve_implicit_viscosity_sor(un_theta, nn, mn, mask, mu_grid, source_term,
                                  dt, dr, dz, max_iter=20, omega=1.4, closed_top=False):
     """
