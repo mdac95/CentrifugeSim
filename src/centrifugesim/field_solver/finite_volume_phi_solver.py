@@ -79,8 +79,6 @@ def _compute_EJ_flux_based(phi, mask_u8, r_c, r_e, z_c, dz_j, dr_i,
             elif i < Nr - 1:
                 # Boundary: Plasma (i) -> Solid (i+1) (Anode or Wall)
                 # If Anode (Dirichlet), we calculate flux. If Insulator, flux is 0.
-                # For simplicity in post-processing, we often assume 0 unless we specifically track anode masks.
-                # Given your plot issue, assuming 0 flux into "generic solid" is safer for the cathode wall.
                 flux_east = 0.0 
 
             # --- WEST FACE (i-1 to i) ---
