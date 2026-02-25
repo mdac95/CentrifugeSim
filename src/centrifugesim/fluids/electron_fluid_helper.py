@@ -485,7 +485,7 @@ def assemble_Te_diffusion_FD(Te, ne, kappa_par, kappa_perp,
             G_sheath = delta_sheath * ne[i_p, j_c] * cs * kb
             aP[i_p, j_c] += G_sheath / dr # <--- Divided by dr
 
-    # 2. Axial Face (Horizontal Cap) <--- NEW SECTION
+    # 2. Axial Face (Horizontal Cap)
     # Assumes plasma is at j_c + 1 (Above cathode)
     num_pts_z = len(i_cathode_z)
     for k in range(num_pts_z):
@@ -672,9 +672,7 @@ def assemble_Te_advection_diffusion_FD(Te, ne, ur, uz,
                        
             b[i, j] = (1.5 * ne[i, j] * kb / dt) * Te[i, j]
 
-    # --- SPECIAL CATHODE BOUNDARY LOOPS ---
-    # (Kept identical but with extra boundary checks just in case)
-    
+    # --- SPECIAL CATHODE BOUNDARY LOOPS ---  
     num_pts_r = len(i_cathode_r)
     for k in range(num_pts_r):
         i_c = i_cathode_r[k]
