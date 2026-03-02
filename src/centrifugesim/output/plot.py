@@ -3,19 +3,31 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 
 def plot_field(data, geom, title, cbar_label, 
-               log_scale=False, divergent=False, vmin=None, vmax=None, filename=None):
+               log_scale=False, divergent=False, vmin=None, vmax=None, 
+               zmax=None, filename=None):
     """
     Plots a 2D field with automatic masking and formatting.
     
     Parameters:
     - divergent (bool): If True, uses a Red-White-Blue colormap and centers 
       the color scale at 0 by making vmin/vmax symmetric.
+    - zmax (float): Optional maximum Z value to plot up to. 
+      Must be smaller than geom.Z.max().
     """
     # 1. Create copy and apply mask
     data_plot = np.copy(data)
     # Handle the case where geom.mask might be boolean or binary
     data_plot[geom.mask == 0] = np.nan
     
+    # Apply zmax filtering if provided
+    if zmax is not None:
+        if zmax >= np.max(geom.Z):
+            print(f"Warning: zmax ({zmax}) is >= geom.Z.max() ({np.max(geom.Z):.2f}). Ignoring zmax cutoff.")
+            zmax = None  # Reset to None so we don't unnecessarily crop the axes later
+        else:
+            # Mask data beyond zmax so it doesn't affect color scaling limits
+            data_plot[geom.Z > zmax] = np.nan
+            
     # 2. Setup Figure
     plt.figure(figsize=(11, 5))
     
@@ -56,6 +68,11 @@ def plot_field(data, geom, title, cbar_label,
     plt.xlabel('z (m)')
     plt.ylabel('r (m)')
     plt.title(title)
+    
+    # Crop the x-axis if a valid zmax was provided
+    if zmax is not None:
+        plt.xlim(np.min(geom.Z), zmax)
+        
     plt.tight_layout()
     
     # 6. Save or Show
