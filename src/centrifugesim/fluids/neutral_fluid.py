@@ -354,7 +354,7 @@ class NeutralFluidContainer:
         # STEP B: IMPLICIT COLLISIONS (Source) - ONCE PER GLOBAL STEP
         # ==========================================================
         if ion_fluid is not None:
-             self.update_u_in_collisions_implicit(geom, ion_fluid, dt)
+             self.update_u_in_collisions_implicit(geom, ion_fluid, electron_fluid, dt)
         
         if (ion_fluid is not None) and (electron_fluid is not None):
              self.update_temperature_collisions_implicit(ion_fluid, electron_fluid, geom, dt)
@@ -500,23 +500,39 @@ class NeutralFluidContainer:
             self.c_v
         )
 
-    def update_u_in_collisions_implicit(self, geom, ion_fluid, dt):
+    def update_u_in_collisions_implicit(self, geom, ion_fluid, electron_fluid, dt):
         """
         Updates Neutral velocity due to collisions with Ions using an implicit formula.
         Used when fluid ions are on.
         """
 
         # --- 2. Update ut ---
-        neutral_fluid_helper.update_neutral_vtheta_implicit_source(
+        #neutral_fluid_helper.update_neutral_vtheta_implicit_source(
+        #    self.un_theta_grid,
+        #    ion_fluid.vi_theta_grid,
+        #    ion_fluid.ni_grid,
+        #    ion_fluid.nu_i_grid,
+        #    ion_fluid.m_i,
+        #    self.nn_grid,
+        #    self.mass,
+        #    dt,
+        #    self.mask_vel
+        #)
+
+        neutral_fluid_helper.update_neutral_vtheta_implicit_source_3fluid(
             self.un_theta_grid,
             ion_fluid.vi_theta_grid,
+            electron_fluid.uet_grid,
             ion_fluid.ni_grid,
             ion_fluid.nu_i_grid,
             ion_fluid.m_i,
+            electron_fluid.ne_grid,
+            electron_fluid.nu_e_grid,
+            constants.m_e,
             self.nn_grid,
             self.mass,
             dt,
-            self.mask_vel
+            self.mask_vel,
         )
 
         # --- 2. Update ur ---

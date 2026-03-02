@@ -233,7 +233,7 @@ class HybridPICModel:
         self.update_Je_and_Ji_from_Jtotal(geom, electron_fluid, ion_fluid)
         
         # Update electron drift velocities by passing 'self' (the hybrid_pic instance)
-        electron_fluid.update_drift_velocities(self)
+        electron_fluid.update_drift_velocities(self, neutral_fluid, geom)
         
         # 3. Compute 3V squared relative velocities (slip velocities)
         # Electron-Ion relative velocity squared

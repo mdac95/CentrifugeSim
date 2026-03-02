@@ -1681,6 +1681,57 @@ def add_viscous_heating(T, rho, ur, ut, uz, mu, c_v, dr, dz, dt,
 
 
 @njit(cache=True)
+def update_neutral_vtheta_implicit_source_3fluid(un_theta, vi_theta, ve_theta,
+                                                 ni, nu_in, mi,
+                                                 ne, nu_en, me,
+                                                 nn, mn,
+                                                 dt, mask):
+    """
+    Updates Neutral v_theta using an Implicit Source term for Drag from both ions and electrons.
+    Allows large timesteps (dt) without instability from stiff collisions.
+    
+    Formula:
+      u_new = ( u_old + dt * (alpha_i * v_i + alpha_e * v_e) ) / ( 1 + dt * (alpha_i + alpha_e) )
+      where alpha_i = (ni * mi * nu_in) / (nn * mn)
+            alpha_e = (ne * me * nu_en) / (nn * mn)
+    """
+    Nr, Nz = un_theta.shape
+    
+    for i in range(1, Nr-1):
+        for j in range(1, Nz-1):
+            if mask[i, j] == 1:
+                # Local Densities (Mass density = n * m)
+                rho_n = nn[i, j] * mn
+                rho_i = ni[i, j] * mi
+                rho_e = ne[i, j] * me
+                
+                # Collision Rates (Coupling Strengths) [1/s]
+                if rho_n > 1e-20:
+                    nu_coupling_ion = (rho_i * nu_in[i, j]) / rho_n
+                    nu_coupling_elec = (rho_e * nu_en[i, j]) / rho_n
+                else:
+                    nu_coupling_ion = 0.0
+                    nu_coupling_elec = 0.0
+                
+                # Total coupling dictates the stiffness/denominator
+                nu_coupling_total = nu_coupling_ion + nu_coupling_elec
+                
+                # Implicit Update
+                denom = 1.0 + dt * nu_coupling_total
+                
+                u_old = un_theta[i, j]
+                v_ion = vi_theta[i, j]
+                v_elec = ve_theta[i, j]
+                
+                # Numerator: Old Velocity + Both 'Target' velocities weighted by their respective couplings
+                numerator = u_old + dt * (nu_coupling_ion * v_ion + nu_coupling_elec * v_elec)
+                
+                un_theta[i, j] = numerator / denom
+                
+            else:
+                un_theta[i, j] = 0.0
+                
+@njit(cache=True)
 def update_neutral_vtheta_implicit_source(un_theta, vi_theta, 
                                           ni, nu_in, mi, 
                                           nn, mn, 

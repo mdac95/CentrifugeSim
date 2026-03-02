@@ -66,7 +66,7 @@ class ElectronFluidContainer:
         
         self.uet_grid0=0.0
         electron_fluid_helper.update_vtheta_kernel_algebraic(self.uet_grid,
-                                       hybrid_pic.Jer,
+                                       hybrid_pic.Jer_grid,
                                        hybrid_pic.Bz_grid,
                                        self.ne_grid,
                                        self.nu_e_grid,
