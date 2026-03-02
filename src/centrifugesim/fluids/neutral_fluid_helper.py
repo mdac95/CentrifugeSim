@@ -8,7 +8,7 @@ from centrifugesim.geometry.geometry import Geometry
 # Lennard–Jones parameters (sigma in meters, eps_over_k in Kelvin)
 _LJ_DB = {
     # name: (sigma [m], eps_over_k [K], kind)
-    #"H":  (2.708e-10,  37.0,  "diatomic"),
+    #"H":  (2.708e-10,  37.0,  "monatomic"),
     "H2":  (2.827e-10,  59.7,  "diatomic"),
     "He":  (2.551e-10, 10.22, "monatomic"),
     "N2":  (3.798e-10, 91.5,  "diatomic"),
