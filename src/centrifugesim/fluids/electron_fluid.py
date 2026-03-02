@@ -48,7 +48,7 @@ class ElectronFluidContainer:
         self.uet_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
         self.uez_grid = np.zeros((self.Nr, self.Nz)).astype(np.float64)
 
-    def update_drift_velocities(self, hybrid_pic):
+    def update_drift_velocities(self, hybrid_pic, neutral_fluid, geom): # add geom and neutral_fluid
         """
         Update electron drift velocities from current densities and ne:
             u_e = J_e / ( -e * n_e )
@@ -58,10 +58,21 @@ class ElectronFluidContainer:
         self.uer_grid[:, :] = hybrid_pic.Jer_grid / (-qe * ne_eff)
         self.uez_grid[:, :] = hybrid_pic.Jez_grid / (-qe * ne_eff)
 
-        self.uet_grid[:, :] = (
-            hybrid_pic.Jet_grid / 
-            (- constants.q_e * self.ne_grid)
-        )
+
+        #self.uet_grid[:, :] = (
+        #    hybrid_pic.Jet_grid / 
+        #    (- constants.q_e * self.ne_grid)
+        #)
+        
+        self.uet_grid0=0.0
+        electron_fluid_helper.update_vtheta_kernel_algebraic(self.uet_grid,
+                                       hybrid_pic.Jer,
+                                       hybrid_pic.Bz_grid,
+                                       self.ne_grid,
+                                       self.nu_e_grid,
+                                       neutral_fluid.un_theta_grid,
+                                       geom.mask,
+                                       constants.m_e)
 
         self.uer_grid[-1,:] = 0.0
         self.uet_grid[-1,:] = 0.0

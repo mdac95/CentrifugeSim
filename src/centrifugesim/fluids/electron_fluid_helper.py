@@ -1172,3 +1172,45 @@ def assemble_ne_advection_diffusion_FV(ne_star,
             b[i, j] = inertia * ne_star[i, j]
 
     return aP, aE, aW, aN, aS, b
+
+
+@njit(cache=True)
+def update_vtheta_kernel_algebraic(vtheta_out, Jer, Bz, ne, nu_e, un_theta, mask, me):
+    """
+    Solves the steady-state algebraic momentum balance for Electron v_theta:
+    0 = (J x B) - Drag
+    v_theta_e = v_theta_n - (Jer * Bz) / (ne * me * (nu_en + nu_ei))
+    
+    Parameters:
+    -----------
+    vtheta_out : 2D array (Nr, Nz) to be updated in-place
+    Jer         : 2D array (Nr, Nz), Electron radial Current Density
+    Bz         : 2D array (Nr, Nz), Axial Magnetic Field
+    ne         : 2D array (Nr, Nz), Electron Density
+    nu_e      : 2D array (Nr, Nz), Electron effective Collision Freq
+    un_theta   : 2D array (Nr, Nz), Neutral Gas Velocity
+    mask       : 2D array (Nr, Nz), 1=Plasma, 0=Solid
+    me         : float, Electron Mass
+    """
+    Nr, Nz = Jer.shape
+    
+    for i in range(Nr):
+        for j in range(Nz):
+            if mask[i, j] == 1:
+                # Local scalar values
+                n_local = ne[i, j]
+                nu_local = nu_e[i, j]
+                                    
+                # Force calculation
+                # Lorentz Force term (assuming J_r x B_z -> -theta direction)
+                F_lorentz = -1.0 * Jer[i, j] * Bz[i, j]
+                    
+                # Drag coefficient = rho_i * nu_in
+                drag_coeff = me * n_local * nu_local
+                    
+                # Algebraic Solution
+                vtheta_out[i, j] = un_theta[i, j] + (F_lorentz / drag_coeff)
+                    
+            else:
+                # Solid boundaries
+                vtheta_out[i, j] = 0.0
