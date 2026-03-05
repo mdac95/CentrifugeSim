@@ -14,7 +14,7 @@ _LJ_DB = {
     "N2":  (3.798e-10, 91.5,  "diatomic"),
     "O2":  (3.467e-10, 106.7, "diatomic"),
     "Ar":  (3.405e-10, 119.8, "monatomic"),
-    "Li":  (2.85e-10, 1899, "monatomic"),
+    "Li":  (2.8517e-10, 713.6, "monatomic"), # Calculation of the Lennard-Jones n-rn Potential Energy Paramcters for Metals by S. Zhen and G.J. Davies
     "Xe":  (4.082e-10, 206.9, "monatomic"),
     "Ne":  (2.764e-10, 40.2, "monatomic"),
     "Cl2":  (4.217e-10, 316.0, "diatomic"),
